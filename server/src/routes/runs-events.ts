@@ -23,6 +23,12 @@ export interface RouteResponse {
   body?: Record<string, unknown>;
 }
 
+const MAX_RUN_EVENT_PAYLOAD_BYTES = 32 * 1024;
+
+function jsonByteLength(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
 export function createRunsEventsRoute(deps: RunsEventsDeps) {
   return async (req: RouteRequest): Promise<RouteResponse> => {
     const auth = req.headers.authorization;
@@ -34,6 +40,9 @@ export function createRunsEventsRoute(deps: RunsEventsDeps) {
     }
     if (typeof req.body.type !== "string") {
       return { status: 400, body: { error: "missing_event_type" } };
+    }
+    if (jsonByteLength(req.body) > MAX_RUN_EVENT_PAYLOAD_BYTES) {
+      return { status: 413, body: { error: "payload_too_large", maxBytes: MAX_RUN_EVENT_PAYLOAD_BYTES } };
     }
     await deps.appendRunEvent({
       runId: v.claims.runId,

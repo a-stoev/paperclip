@@ -29,6 +29,24 @@ describe("mapTerminalState", () => {
     expect(r.exitCode).toBe(137);
   });
 
+  it("does not map exitCode 137 without OOMKilled reason to oom_killed", () => {
+    const r = mapTerminalState({
+      job: { status: { failed: 1 } },
+      pod: { status: { containerStatuses: [{ name: "agent", image: "x", imageID: "", ready: false, restartCount: 0, state: { terminated: { reason: "Error", exitCode: 137 } } }] } },
+    });
+    expect(r.errorCode).toBe("agent_exit_nonzero");
+    expect(r.exitCode).toBe(137);
+  });
+
+  it("does not map exitCode 137 without a reason to oom_killed", () => {
+    const r = mapTerminalState({
+      job: { status: { failed: 1 } },
+      pod: { status: { containerStatuses: [{ name: "agent", image: "x", imageID: "", ready: false, restartCount: 0, state: { terminated: { exitCode: 137 } } }] } },
+    });
+    expect(r.errorCode).toBe("agent_exit_nonzero");
+    expect(r.exitCode).toBe(137);
+  });
+
   it("maps DeadlineExceeded to timeout", () => {
     const r = mapTerminalState({
       job: { status: { conditions: [{ type: "Failed", reason: "DeadlineExceeded", status: "True" }] } },

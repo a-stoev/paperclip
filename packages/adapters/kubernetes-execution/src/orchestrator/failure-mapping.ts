@@ -69,9 +69,10 @@ export function mapTerminalState(input: MapTerminalStateInput): AdapterExecution
     }
   }
 
-  // OOM killed — accept either the explicit reason or the conventional 137 exit code.
+  // OOM killed — require Kubernetes' explicit reason. Exit 137 can also come
+  // from SIGKILL after a cancelled Job exceeds its termination grace period.
   for (const c of containers) {
-    if (c.state?.terminated?.reason === "OOMKilled" || c.state?.terminated?.exitCode === 137) {
+    if (c.state?.terminated?.reason === "OOMKilled") {
       return {
         exitCode: 137,
         signal: "SIGKILL",

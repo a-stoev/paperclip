@@ -56,4 +56,16 @@ describe("POST /api/runs/:runId/events", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it("rejects oversized event payloads before writing to the database", async () => {
+    const d = deps();
+    const handler = createRunsEventsRoute(d);
+    const res = await handler({
+      params: { runId: "r-1" },
+      headers: { authorization: "Bearer fake.jwt" },
+      body: { type: "assistant", text: "x".repeat(33 * 1024) },
+    });
+    expect(res.status).toBe(413);
+    expect(d.appendRunEvent).not.toHaveBeenCalled();
+  });
 });
