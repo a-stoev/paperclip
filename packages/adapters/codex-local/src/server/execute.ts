@@ -14,7 +14,6 @@ import {
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
   prepareAdapterExecutionTargetRuntime,
   readAdapterExecutionTarget,
-  resolveAdapterExecutionTargetTimeoutSec,
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
   startAdapterExecutionTargetPaperclipBridge,
@@ -285,6 +284,18 @@ export async function ensureCodexSkillsInjected(
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
 
+  if (ctx.executionTarget?.kind === "kubernetes") {
+    return {
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      errorCode: "execution_target_not_yet_supported",
+      errorMessage:
+        "Kubernetes execution target is not implemented yet for this adapter. " +
+        "Tenant provisioning is available in M1; agent execution lands in M2.",
+    };
+  }
+
   const promptTemplate = asString(
     config.promptTemplate,
     DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
@@ -359,11 +370,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       desiredSkillNames,
     },
   );
-  const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
-    executionTarget,
-    asNumber(config.timeoutSec, 0),
-  );
-  const graceSec = asNumber(config.graceSec, 20);
   let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
   const preparedExecutionTargetRuntime = executionTargetIsRemote
     ? await (async () => {
@@ -375,7 +381,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           runId,
           target: executionTarget,
           adapterKey: "codex",
-          timeoutSec,
           workspaceLocalDir: cwd,
           installCommand: SANDBOX_INSTALL_COMMAND,
           detectCommand: command,
@@ -393,8 +398,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     effectiveExecutionCwd = preparedExecutionTargetRuntime.workspaceRemoteDir;
   }
   const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
-  const executionTargetIsSandbox =
-    runtimeExecutionTarget?.kind === "remote" && runtimeExecutionTarget.transport === "sandbox";
   const restoreRemoteWorkspace = preparedExecutionTargetRuntime
     ? () => preparedExecutionTargetRuntime.restoreWorkspace()
     : null;
@@ -491,7 +494,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       target: runtimeExecutionTarget,
       runtimeRootDir: preparedExecutionTargetRuntime?.runtimeRootDir,
       adapterKey: "codex",
-      timeoutSec,
       hostApiToken: env.PAPERCLIP_API_KEY,
       onLog,
     });
@@ -517,8 +519,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     detectCommand: ctx.runtimeCommandSpec?.detectCommand,
     cwd,
     env: runtimeEnv,
-    timeoutSec,
-    graceSec,
+    timeoutSec: asNumber(config.timeoutSec, 0),
+    graceSec: asNumber(config.graceSec, 20),
     onLog,
   });
   await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv);
@@ -528,6 +530,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     includeRuntimeKeys: ["HOME"],
     resolvedCommand,
   });
+
+  const timeoutSec = asNumber(config.timeoutSec, 0);
+  const graceSec = asNumber(config.graceSec, 20);
 
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
@@ -653,11 +658,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
     return notes;
   })();
-  if (executionTargetIsSandbox) {
-    commandNotes.push(
-      "Added --skip-git-repo-check for sandbox execution because Codex requires an explicit trust bypass in headless remote workspaces.",
-    );
-  }
   const renderedPrompt = shouldUseResumeDeltaPrompt ? "" : renderTemplate(promptTemplate, templateData);
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
   const prompt = joinPromptSections([
@@ -680,10 +680,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const runAttempt = async (resumeSessionId: string | null) => {
     const execArgs = buildCodexExecArgs(
       forceSaferInvocation ? { ...config, fastMode: false } : config,
-      {
-        resumeSessionId,
-        skipGitRepoCheck: executionTargetIsSandbox,
-      },
+      { resumeSessionId },
     );
     const args = execArgs.args;
     const commandNotesWithFastMode =
