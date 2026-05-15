@@ -21,6 +21,14 @@ const mockAnnotationsApi = vi.hoisted(() => ({
   updateStatus: vi.fn(),
 }));
 
+const mockPendingAnchor = vi.hoisted(() => ({
+  selector: {
+    quote: { exact: "should keep the editor", prefix: "We ", suffix: "." },
+    position: { normalizedStart: 10, normalizedEnd: 32, markdownStart: 10, markdownEnd: 32 },
+  },
+  selectedText: "should keep the editor",
+}));
+
 vi.mock("@/api/document-annotations", () => ({
   documentAnnotationsApi: mockAnnotationsApi,
 }));
@@ -29,8 +37,45 @@ vi.mock("./MarkdownBody", () => ({
   MarkdownBody: ({ children }: { children: string }) => <div>{children}</div>,
 }));
 
+vi.mock("@/components/ui/sheet", () => ({
+  Sheet: ({ open, children }: { open: boolean; children: React.ReactNode }) =>
+    open ? <div data-slot="sheet">{children}</div> : null,
+  SheetContent: ({
+    children,
+    className,
+    side,
+  }: {
+    children: React.ReactNode;
+    className?: string;
+    side?: string;
+  }) => (
+    <div data-slot="sheet-content" data-side={side} className={className}>
+      {children}
+    </div>
+  ),
+  SheetTitle: ({ children, className }: { children: React.ReactNode; className?: string }) => (
+    <div data-slot="sheet-title" className={className}>{children}</div>
+  ),
+}));
+
 vi.mock("./DocumentAnnotationLayer", () => ({
-  DocumentAnnotationLayer: () => null,
+  DocumentAnnotationLayer: (props: {
+    newCommentDisabled?: boolean;
+    onPendingAnchorChange: (anchor: typeof mockPendingAnchor | null) => void;
+    onRequestComment: (anchor: typeof mockPendingAnchor) => void;
+  }) => (
+    <button
+      type="button"
+      data-testid="mock-annotation-selection"
+      disabled={props.newCommentDisabled}
+      onClick={() => {
+        props.onPendingAnchorChange(mockPendingAnchor);
+        props.onRequestComment(mockPendingAnchor);
+      }}
+    >
+      Mock selection
+    </button>
+  ),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -40,6 +85,12 @@ async function flush() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+}
+
+function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  setter?.call(textarea, value);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function makeQueryClient() {
@@ -200,6 +251,7 @@ describe("IssueDocumentAnnotations", () => {
     const chip = container.querySelector('[data-testid="document-annotation-count-plan"]');
     expect(chip).not.toBeNull();
     expect(chip!.textContent).toContain("1");
+    expect(mockAnnotationsApi.list).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       (chip as HTMLButtonElement).click();
@@ -394,5 +446,153 @@ describe("IssueDocumentAnnotations", () => {
     expect(cta).not.toBeNull();
     expect(cta!.textContent).toMatch(/New comment on selection/i);
     expect(cta!.textContent).toMatch(/⌘⇧M/);
+  });
+
+  it("creates a thread from a captured selection and refreshes the shared annotations query", async () => {
+    mockAnnotationsApi.list.mockResolvedValue([]);
+    mockAnnotationsApi.create.mockResolvedValue(makeThread({ id: "created-1" }));
+    const root = createRoot(container);
+    const queryClient = makeQueryClient();
+    const doc = makeDoc();
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Harness doc={doc} initialPanelOpen />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+    await flush();
+    expect(mockAnnotationsApi.list).toHaveBeenCalledTimes(1);
+
+    const selectButton = container.querySelector('[data-testid="mock-annotation-selection"]') as HTMLButtonElement | null;
+    expect(selectButton).not.toBeNull();
+    await act(async () => {
+      selectButton!.click();
+    });
+    await flush();
+
+    const composer = container.querySelector('[data-testid="document-annotation-composer"]') as HTMLTextAreaElement | null;
+    expect(composer).not.toBeNull();
+    await act(async () => {
+      setTextareaValue(composer!, "New anchored comment");
+    });
+    await flush();
+
+    const submit = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Comment",
+    );
+    expect(submit).not.toBeUndefined();
+    await act(async () => {
+      submit!.click();
+    });
+    await flush();
+    await flush();
+
+    expect(mockAnnotationsApi.create).toHaveBeenCalledWith("issue-1", "plan", {
+      baseRevisionId: "rev-4",
+      baseRevisionNumber: 4,
+      selector: mockPendingAnchor.selector,
+      body: "New anchored comment",
+    });
+    expect(mockAnnotationsApi.list.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("shows resolve and reopen actions and updates thread status", async () => {
+    mockAnnotationsApi.list.mockResolvedValue([
+      makeThread({ id: "open-1" }),
+      makeThread({ id: "resolved-1", status: "resolved" }),
+    ]);
+    mockAnnotationsApi.updateStatus.mockResolvedValue(makeThread({ id: "open-1", status: "resolved" }));
+    const root = createRoot(container);
+    const queryClient = makeQueryClient();
+    const doc = makeDoc();
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Harness doc={doc} initialPanelOpen />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+    await flush();
+
+    const openThread = container.querySelector('[data-thread-id="open-1"]') as HTMLElement | null;
+    expect(openThread).not.toBeNull();
+    await act(async () => openThread!.click());
+    await flush();
+
+    const resolveButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => /\bResolve\b/.test(button.textContent ?? ""),
+    );
+    expect(resolveButton).not.toBeUndefined();
+    await act(async () => resolveButton!.click());
+    await flush();
+    expect(mockAnnotationsApi.updateStatus).toHaveBeenCalledWith("issue-1", "plan", "open-1", "resolved");
+
+    const resolvedTab = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.startsWith("Resolved"),
+    );
+    expect(resolvedTab).not.toBeUndefined();
+    await act(async () => resolvedTab!.click());
+    await flush();
+
+    const resolvedThread = container.querySelector('[data-thread-id="resolved-1"]') as HTMLElement | null;
+    expect(resolvedThread).not.toBeNull();
+    await act(async () => resolvedThread!.click());
+    await flush();
+
+    const reopenButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Reopen"),
+    );
+    expect(reopenButton).not.toBeUndefined();
+    await act(async () => reopenButton!.click());
+    await flush();
+    expect(mockAnnotationsApi.updateStatus).toHaveBeenCalledWith("issue-1", "plan", "resolved-1", "open");
+  });
+
+  it("renders the mobile annotation panel through the sheet path", async () => {
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: true,
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    mockAnnotationsApi.list.mockResolvedValue([makeThread()]);
+    const root = createRoot(container);
+    const queryClient = makeQueryClient();
+    const doc = makeDoc();
+
+    try {
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={queryClient}>
+            <Harness doc={doc} initialPanelOpen />
+          </QueryClientProvider>,
+        );
+      });
+      await flush();
+      await flush();
+
+      const sheet = container.querySelector('[data-slot="sheet-content"]');
+      expect(sheet).not.toBeNull();
+      expect(sheet?.getAttribute("data-side")).toBe("bottom");
+      expect(sheet?.className).toContain("paperclip-doc-annotation-sheet");
+    } finally {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
   });
 });

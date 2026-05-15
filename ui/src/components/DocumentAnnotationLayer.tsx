@@ -67,8 +67,6 @@ interface ToolbarPosition {
   left: number;
 }
 
-const POSITION_REFRESH_INTERVAL_MS = 250;
-
 export function DocumentAnnotationLayer({
   containerRef,
   markdown,
@@ -137,22 +135,59 @@ export function DocumentAnnotationLayer({
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const container = containerRef.current;
+    const overlay = overlayRef.current;
     let cancelled = false;
+    let frame: number | null = null;
+
     const schedule = () => {
-      if (cancelled) return;
-      computeHighlightRects();
+      if (cancelled || frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        if (!cancelled) computeHighlightRects();
+      });
     };
-    const interval = window.setInterval(schedule, POSITION_REFRESH_INTERVAL_MS);
-    const handleResize = () => schedule();
-    window.addEventListener("resize", handleResize);
-    window.addEventListener("scroll", handleResize, true);
+
+    const handleResizeOrScroll = () => schedule();
+    window.addEventListener("resize", handleResizeOrScroll);
+    window.addEventListener("scroll", handleResizeOrScroll, true);
+
+    const resizeObserver = typeof window.ResizeObserver === "function"
+      ? new window.ResizeObserver(schedule)
+      : null;
+    if (resizeObserver && container) resizeObserver.observe(container);
+    if (resizeObserver && overlay) resizeObserver.observe(overlay);
+
+    const mutationObserver = typeof window.MutationObserver === "function" && container
+      ? new window.MutationObserver((mutations) => {
+        const layer = layerContainerRef.current;
+        const onlyLayerMutations = layer
+          ? mutations.every((mutation) => layer.contains(mutation.target))
+          : false;
+        if (!onlyLayerMutations) schedule();
+      })
+      : null;
+    if (mutationObserver && container) {
+      mutationObserver.observe(container, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "style", "data-state", "open", "hidden", "aria-expanded"],
+      });
+    }
+
+    schedule();
+
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
-      window.removeEventListener("resize", handleResize);
-      window.removeEventListener("scroll", handleResize, true);
+      if (frame !== null) window.cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      mutationObserver?.disconnect();
+      window.removeEventListener("resize", handleResizeOrScroll);
+      window.removeEventListener("scroll", handleResizeOrScroll, true);
     };
-  }, [computeHighlightRects]);
+  }, [computeHighlightRects, containerRef]);
 
   const captureSelection = useCallback((): PendingAnchor | null => {
     const container = containerRef.current;
