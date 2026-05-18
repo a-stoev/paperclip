@@ -128,7 +128,9 @@ export function CloudUpstream() {
       cloudUpstreamsApi.createRun(input.connectionId, { retryOfRunId: input.retryOfRunId ?? null }),
     onSuccess: async (run) => {
       setActiveRun(run);
-      setNotice("Push run completed. Review activation before unpausing automations.");
+      setNotice(run.status === "succeeded"
+        ? "Push run completed. Review activation before unpausing automations."
+        : "Push run failed. Review the run events and retry after correcting the issue.");
       setActionError(null);
       await invalidateUpstreams();
     },

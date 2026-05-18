@@ -1,8 +1,9 @@
-import crypto from "node:crypto";
-import { count, eq } from "drizzle-orm";
+import crypto, { sign } from "node:crypto";
+import { and, count, desc, eq } from "drizzle-orm";
 import type {
   CloudUpstreamConnectStartResponse,
   CloudUpstreamConnection,
+  CloudUpstreamConflict,
   CloudUpstreamPreview,
   CloudUpstreamRun,
   CloudUpstreamRunEvent,
@@ -10,44 +11,132 @@ import type {
   CloudUpstreamSummaryCount,
   CloudUpstreamTarget,
   CloudUpstreamWarning,
+  CompanyPortabilityExportResult,
+  CompanyPortabilityFileEntry,
 } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
-import { agents, companies, goals, issueComments, issues, projects, routines } from "@paperclipai/db";
+import {
+  agents,
+  cloudUpstreamConnections,
+  cloudUpstreamRuns,
+  companies,
+  goals,
+  issueComments,
+  issues,
+  projects,
+  routines,
+} from "@paperclipai/db";
 import { badRequest, notFound } from "../errors.js";
+import { companyPortabilityService } from "./company-portability.js";
 
 const DEFAULT_SCOPES = ["upstream_import:preview", "upstream_import:write", "upstream_import:read"];
-const TRANSFER_SCHEMA_MAJOR = 1;
+const TRANSFER_SCHEMA = {
+  family: "paperclip-upstream-transfer",
+  version: "1.0.0",
+  major: 1,
+  minor: 0,
+} as const;
+const DEFAULT_MAX_ENTITIES_PER_CHUNK = 100;
 
-type PendingConnection = {
-  connectionId: string;
-  companyId: string;
-  state: string;
-  codeVerifier: string;
-  redirectUri: string;
-  tokenUrl: string;
-  privateKeyPem: string;
+type NormalizedSha256 = `sha256:${string}`;
+
+type SourceEntityKey = {
+  sourceInstanceId: string;
+  sourceCompanyId: string;
+  sourceEntityType: string;
+  sourceEntityId: string;
+  sourceNaturalKey?: string;
 };
 
-type StoredToken = {
-  accessToken: string;
-  tokenId: string | null;
+type UpstreamTransferWarning = {
+  code: string;
+  severity: "info" | "warning" | "blocker";
+  message: string;
+  entity?: SourceEntityKey;
 };
 
-const connections = new Map<string, CloudUpstreamConnection>();
-const pendingConnections = new Map<string, PendingConnection>();
-const runs = new Map<string, CloudUpstreamRun>();
-const connectionTokens = new Map<string, StoredToken>();
+type UpstreamTransferEntityRecord = {
+  key: SourceEntityKey;
+  contentHash: NormalizedSha256;
+  dependencies: SourceEntityKey[];
+  warnings: UpstreamTransferWarning[];
+};
+
+type LocalUpstreamExportEntity = {
+  record: UpstreamTransferEntityRecord;
+  body: Record<string, unknown>;
+  conflictKeys?: string[];
+};
+
+type LocalUpstreamExportChunk = {
+  chunkIndex: number;
+  totalChunks: number;
+  byteLength: number;
+  sha256: NormalizedSha256;
+  manifestHash: NormalizedSha256;
+  payload: {
+    entityKeys: SourceEntityKey[];
+  };
+};
+
+type UpstreamTransferManifest = {
+  schema: typeof TRANSFER_SCHEMA;
+  source: {
+    sourceInstanceId: string;
+    sourceCompanyId: string;
+    sourceInstanceKeyFingerprint: string;
+    exporterVersion: string;
+    sourceSchemaVersion: string;
+  };
+  target: {
+    targetStackId: string;
+    targetCompanyId: string;
+    targetOrigin: string;
+    supportedSchemaMajor: number;
+  };
+  runId: string;
+  idempotencyKey: string;
+  generatedAt: string;
+  entityCount: number;
+  entities: UpstreamTransferEntityRecord[];
+  chunks: Array<Omit<LocalUpstreamExportChunk, "payload">>;
+  warnings: UpstreamTransferWarning[];
+  featureFlags: string[];
+  manifestHash: NormalizedSha256;
+};
+
+type LocalUpstreamExportBundle = {
+  manifest: UpstreamTransferManifest;
+  entities: LocalUpstreamExportEntity[];
+  chunks: LocalUpstreamExportChunk[];
+};
+
+type ConnectionRow = typeof cloudUpstreamConnections.$inferSelect;
+type RunRow = typeof cloudUpstreamRuns.$inferSelect;
 
 export function cloudUpstreamService(db: Db, options: { instanceId?: string } = {}) {
-  const sourceInstanceId = options.instanceId ?? "local-paperclip";
+  const sourceInstanceId = `paperclip-local-${options.instanceId ?? "default"}`;
+  const portability = companyPortabilityService(db);
 
   return {
-    list: async (companyId: string): Promise<CloudUpstreamsState> => ({
-      connections: [...connections.values()].filter((connection) => connection.companyId === companyId),
-      runs: [...runs.values()]
-        .filter((run) => run.companyId === companyId)
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt)),
-    }),
+    list: async (companyId: string): Promise<CloudUpstreamsState> => {
+      const [connectionRows, runRows] = await Promise.all([
+        db
+          .select()
+          .from(cloudUpstreamConnections)
+          .where(eq(cloudUpstreamConnections.companyId, companyId))
+          .orderBy(desc(cloudUpstreamConnections.updatedAt)),
+        db
+          .select()
+          .from(cloudUpstreamRuns)
+          .where(eq(cloudUpstreamRuns.companyId, companyId))
+          .orderBy(desc(cloudUpstreamRuns.createdAt)),
+      ]);
+      return {
+        connections: connectionRows.map(connectionFromRow),
+        runs: runRows.map(runFromRow),
+      };
+    },
 
     startConnect: async (input: {
       companyId: string;
@@ -57,44 +146,45 @@ export function cloudUpstreamService(db: Db, options: { instanceId?: string } = 
       await requireCompany(input.companyId);
       const remoteUrl = input.remoteUrl.trim();
       if (!remoteUrl) throw badRequest("Remote URL is required");
+
       const discovery = await fetchDiscovery(remoteUrl);
       const target = targetFromDiscovery(discovery);
-      const now = new Date().toISOString();
       const connectionId = crypto.randomUUID();
       const state = crypto.randomBytes(24).toString("base64url");
       const codeVerifier = crypto.randomBytes(32).toString("base64url");
       const codeChallenge = crypto.createHash("sha256").update(codeVerifier, "utf8").digest("base64url");
       const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
       const sourcePublicKey = publicKey.export({ type: "spki", format: "pem" }).toString();
-      const sourceInstanceFingerprint = crypto
+      const sourceInstanceFingerprint = `sha256:${crypto
         .createHash("sha256")
-        .update(`${sourceInstanceId}:${input.companyId}`, "utf8")
-        .digest("hex")
-        .slice(0, 16);
+        .update(publicKey.export({ type: "spki", format: "der" }))
+        .digest("hex")}`;
 
-      const connection: CloudUpstreamConnection = {
+      const [row] = await db.insert(cloudUpstreamConnections).values({
         id: connectionId,
         companyId: input.companyId,
         remoteUrl,
-        target,
+        sourceInstanceId,
+        sourceInstanceFingerprint,
+        sourcePublicKey,
+        privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
         tokenStatus: "pending",
         scopes: scopesFromDiscovery(discovery),
-        authorizedGlobalUserId: null,
-        expiresAt: null,
-        createdAt: now,
-        updatedAt: now,
-        lastRunId: null,
-      };
-      connections.set(connectionId, connection);
-      pendingConnections.set(connectionId, {
-        connectionId,
-        companyId: input.companyId,
-        state,
-        codeVerifier,
-        redirectUri: input.redirectUri,
-        tokenUrl: tokenUrlFromDiscovery(discovery),
-        privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-      });
+        targetStackId: target.stackId,
+        targetStackSlug: target.stackSlug,
+        targetStackDisplayName: target.stackDisplayName,
+        targetCompanyId: target.companyId,
+        targetOrigin: target.origin,
+        targetPrimaryHost: target.primaryHost,
+        targetProduct: target.product,
+        targetSchemaMajor: target.schemaMajor,
+        targetMaxChunkBytes: target.maxChunkBytes,
+        pendingState: state,
+        pendingCodeVerifier: codeVerifier,
+        pendingRedirectUri: input.redirectUri,
+        pendingTokenUrl: tokenUrlFromDiscovery(discovery),
+      }).returning();
+      if (!row) throw badRequest("Failed to create cloud upstream connection");
 
       const authorizationUrl = new URL(consentUrlFromDiscovery(discovery));
       authorizationUrl.searchParams.set("stackId", target.stackId);
@@ -105,12 +195,12 @@ export function cloudUpstreamService(db: Db, options: { instanceId?: string } = 
       authorizationUrl.searchParams.set("sourceInstanceId", sourceInstanceId);
       authorizationUrl.searchParams.set("sourceInstanceFingerprint", sourceInstanceFingerprint);
       authorizationUrl.searchParams.set("sourcePublicKey", sourcePublicKey);
-      authorizationUrl.searchParams.set("scopes", connection.scopes.join(" "));
+      authorizationUrl.searchParams.set("scopes", row.scopes.join(" "));
 
       return {
-        pendingConnectionId: connectionId,
+        pendingConnectionId: row.id,
         authorizationUrl: authorizationUrl.toString(),
-        connection,
+        connection: connectionFromRow(row),
       };
     },
 
@@ -119,140 +209,260 @@ export function cloudUpstreamService(db: Db, options: { instanceId?: string } = 
       code: string;
       state: string;
     }): Promise<CloudUpstreamConnection> => {
-      const pending = pendingConnections.get(input.pendingConnectionId);
-      if (!pending) throw notFound("Pending cloud upstream connection was not found");
-      if (input.state !== pending.state) throw badRequest("Cloud upstream state did not match");
-      const connection = connections.get(pending.connectionId);
-      if (!connection) throw notFound("Cloud upstream connection was not found");
-      const tokenResponse = await postJson<Record<string, unknown>>(pending.tokenUrl, {
+      const pending = await getConnectionRow(input.pendingConnectionId);
+      if (!pending.pendingState || !pending.pendingCodeVerifier || !pending.pendingRedirectUri || !pending.pendingTokenUrl) {
+        throw notFound("Pending cloud upstream connection was not found");
+      }
+      if (input.state !== pending.pendingState) throw badRequest("Cloud upstream state did not match");
+      const tokenResponse = await postJson<Record<string, unknown>>(pending.pendingTokenUrl, {
         grantType: "authorization_code",
         code: input.code,
-        redirectUri: pending.redirectUri,
-        codeVerifier: pending.codeVerifier,
+        redirectUri: pending.pendingRedirectUri,
+        codeVerifier: pending.pendingCodeVerifier,
       });
       const accessToken = stringField(tokenResponse, "accessToken");
       const token = objectField(tokenResponse, "token");
-      connectionTokens.set(connection.id, {
-        accessToken,
-        tokenId: optionalString(token.id),
-      });
-      const now = new Date().toISOString();
-      const updated: CloudUpstreamConnection = {
-        ...connection,
-        tokenStatus: "connected",
-        authorizedGlobalUserId: optionalString(token.globalUserId),
-        expiresAt: optionalString(token.expiresAt),
-        updatedAt: now,
-      };
-      connections.set(updated.id, updated);
-      pendingConnections.delete(pending.connectionId);
-      return updated;
+      const expiresAt = optionalString(token.expiresAt) ?? optionalString(tokenResponse.expiresAt);
+      const [updated] = await db
+        .update(cloudUpstreamConnections)
+        .set({
+          tokenStatus: "connected",
+          authorizedGlobalUserId: optionalString(token.globalUserId),
+          accessToken,
+          tokenId: optionalString(token.id),
+          tokenExpiresAt: expiresAt ? new Date(expiresAt) : null,
+          pendingState: null,
+          pendingCodeVerifier: null,
+          pendingRedirectUri: null,
+          pendingTokenUrl: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(cloudUpstreamConnections.id, pending.id))
+        .returning();
+      if (!updated) throw notFound("Cloud upstream connection was not found");
+      return connectionFromRow(updated);
     },
 
     preview: async (connectionId: string): Promise<CloudUpstreamPreview> => {
-      const connection = requireConnection(connectionId);
-      const summary = await buildSummary(connection.companyId);
+      const connection = await getConnectionRow(connectionId);
+      const basePreview = await localPreview(connection);
+      if (!basePreview.schemaCompatible || connection.tokenStatus !== "connected") {
+        return basePreview;
+      }
+
+      const bundle = await buildBundle(connection, "preview");
+      const remotePreview = await remotePost(connection, `/api/companies/${encodeURIComponent(connection.targetCompanyId)}/upstream-imports/preview`, {
+        manifest: bundle.manifest,
+        entities: bundle.entities,
+      });
       return {
-        connectionId,
-        sourceCompanyId: connection.companyId,
-        target: connection.target,
-        schemaCompatible: connection.target.schemaMajor === TRANSFER_SCHEMA_MAJOR,
-        summary,
-        warnings: buildWarnings(connection.target.schemaMajor),
-        conflicts: [],
-        generatedAt: new Date().toISOString(),
+        ...basePreview,
+        warnings: mergeWarnings(basePreview.warnings, warningsFromRemote(remotePreview)),
+        conflicts: conflictsFromRemote(remotePreview),
       };
     },
 
     createRun: async (input: { connectionId: string; retryOfRunId?: string | null }): Promise<CloudUpstreamRun> => {
-      const connection = requireConnection(input.connectionId);
+      const connection = await getConnectionRow(input.connectionId);
       if (connection.tokenStatus !== "connected") {
         throw badRequest("Cloud upstream connection is not connected");
       }
-      const preview = await thisPreview(connection);
+      const preview = await localPreview(connection);
       if (!preview.schemaCompatible) {
         throw badRequest("Cloud stack schema is not compatible with this local Paperclip version");
       }
-      const now = new Date().toISOString();
+
+      const bundle = await buildBundle(connection, "apply");
       const runId = crypto.randomUUID();
-      const events = buildCompletedEvents(now, input.retryOfRunId ?? null);
-      const run: CloudUpstreamRun = {
+      const now = new Date();
+      const initialEvents = [
+        event(now.toISOString(), "connect", "completed", "Connected to the target Paperclip Cloud stack."),
+        event(now.toISOString(), "scan", "completed", "Scanned the local company inventory."),
+        event(now.toISOString(), "preview", "completed", "Generated the transfer manifest."),
+        ...(input.retryOfRunId
+          ? [event(now.toISOString(), "push", "retrying", `Retrying run ${input.retryOfRunId} with the same import ledger idempotency key.`)]
+          : []),
+      ];
+      const [created] = await db.insert(cloudUpstreamRuns).values({
         id: runId,
         connectionId: connection.id,
         companyId: connection.companyId,
-        status: "succeeded",
-        activeStep: "activate",
-        progressPercent: 100,
+        status: "running",
+        activeStep: "push",
+        progressPercent: 45,
         dryRun: false,
+        retryOfRunId: input.retryOfRunId ?? null,
         summary: preview.summary,
         warnings: preview.warnings,
         conflicts: preview.conflicts,
-        events,
-        targetUrl: connection.target.origin,
-        report: {
-          runId,
-          target: connection.target,
-          summary: preview.summary,
-          warnings: preview.warnings,
-          retryOfRunId: input.retryOfRunId ?? null,
-          tokenStoredInProcess: connectionTokens.has(connection.id),
-        },
-        retryOfRunId: input.retryOfRunId ?? null,
+        events: initialEvents,
+        report: {},
+        idempotencyKey: bundle.manifest.idempotencyKey,
+        manifestHash: bundle.manifest.manifestHash,
+        targetUrl: connection.targetOrigin,
         createdAt: now,
         updatedAt: now,
-        completedAt: now,
-      };
-      runs.set(run.id, run);
-      connections.set(connection.id, {
-        ...connection,
-        lastRunId: run.id,
-        updatedAt: now,
-      });
-      return run;
+      }).returning();
+      if (!created) throw badRequest("Failed to create cloud upstream run");
+
+      try {
+        const remoteRun = await remotePost(connection, `/api/companies/${encodeURIComponent(connection.targetCompanyId)}/upstream-imports/runs`, {
+          mode: "apply",
+          manifest: bundle.manifest,
+          entities: bundle.entities,
+        });
+        const remoteRunId = remoteRunIdFromResponse(remoteRun);
+        await updateRun(runId, {
+          remoteRunId,
+          activeStep: "push",
+          progressPercent: 60,
+          events: [
+            ...initialEvents,
+            event(new Date().toISOString(), "push", "updated", "Created or resumed the cloud import ledger run."),
+          ],
+        });
+
+        for (const chunk of bundle.chunks) {
+          await remotePost(connection, `/api/upstream-import-runs/${encodeURIComponent(remoteRunId)}/chunks`, chunk);
+        }
+        await updateRun(runId, {
+          activeStep: "verify",
+          progressPercent: 82,
+          events: [
+            ...initialEvents,
+            event(new Date().toISOString(), "push", "completed", `Uploaded ${bundle.chunks.length} manifest chunk${bundle.chunks.length === 1 ? "" : "s"}.`),
+          ],
+        });
+
+        const applied = await remotePost(connection, `/api/upstream-import-runs/${encodeURIComponent(remoteRunId)}/apply`, {});
+        const remoteEvents = await remoteGet(connection, `/api/upstream-import-runs/${encodeURIComponent(remoteRunId)}/events`).catch(() => null);
+        const completedAt = new Date();
+        const finalEvents = [
+          ...initialEvents,
+          event(completedAt.toISOString(), "push", "completed", "Pushed mapped objects without duplicate creation."),
+          event(completedAt.toISOString(), "verify", "completed", "Verified the cloud import ledger and generated a run report."),
+          event(completedAt.toISOString(), "activate", "completed", "Activation checklist is ready for manual unpause decisions."),
+          ...eventsFromRemote(remoteEvents),
+        ];
+        const finalRun = await updateRun(runId, {
+          remoteRunId,
+          status: "succeeded",
+          activeStep: "activate",
+          progressPercent: 100,
+          warnings: mergeWarnings(preview.warnings, warningsFromRemote(applied)),
+          conflicts: conflictsFromRemote(applied),
+          events: finalEvents,
+          report: {
+            runId,
+            remoteRunId,
+            target: targetFromConnectionRow(connection),
+            manifestHash: bundle.manifest.manifestHash,
+            idempotencyKey: bundle.manifest.idempotencyKey,
+            retryOfRunId: input.retryOfRunId ?? null,
+            result: applied,
+            events: remoteEvents,
+          },
+          completedAt,
+        });
+        await db
+          .update(cloudUpstreamConnections)
+          .set({ lastRunId: finalRun.id, updatedAt: new Date() })
+          .where(eq(cloudUpstreamConnections.id, connection.id));
+        return finalRun;
+      } catch (error) {
+        const failedAt = new Date();
+        return updateRun(runId, {
+          status: "failed",
+          activeStep: "push",
+          progressPercent: 100,
+          events: [
+            ...initialEvents,
+            event(failedAt.toISOString(), "push", "failed", error instanceof Error ? error.message : String(error)),
+          ],
+          report: {
+            runId,
+            target: targetFromConnectionRow(connection),
+            manifestHash: bundle.manifest.manifestHash,
+            idempotencyKey: bundle.manifest.idempotencyKey,
+            retryOfRunId: input.retryOfRunId ?? null,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          completedAt: failedAt,
+        });
+      }
     },
 
     readRun: async (connectionId: string, runId: string): Promise<CloudUpstreamRun> => {
-      const run = runs.get(runId);
-      if (!run || run.connectionId !== connectionId) throw notFound("Cloud upstream run was not found");
-      return run;
+      const row = await getRunRow(connectionId, runId);
+      return runFromRow(row);
     },
 
     cancelRun: async (connectionId: string, runId: string): Promise<CloudUpstreamRun> => {
-      const run = runs.get(runId);
-      if (!run || run.connectionId !== connectionId) throw notFound("Cloud upstream run was not found");
-      if (run.status !== "running") return run;
-      const now = new Date().toISOString();
-      const next: CloudUpstreamRun = {
-        ...run,
+      const row = await getRunRow(connectionId, runId);
+      if (row.status !== "running") return runFromRow(row);
+      const connection = await getConnectionRow(connectionId);
+      if (row.remoteRunId) {
+        await remotePost(connection, `/api/upstream-import-runs/${encodeURIComponent(row.remoteRunId)}/cancel`, {}).catch(() => null);
+      }
+      return updateRun(row.id, {
         status: "cancelled",
-        updatedAt: now,
-        completedAt: now,
+        activeStep: "push",
+        progressPercent: 100,
+        completedAt: new Date(),
         events: [
-          ...run.events,
-          event(now, "push", "failed", "Push cancelled locally before remote apply completed."),
+          ...row.events,
+          event(new Date().toISOString(), "push", "failed", "Push cancelled locally before remote apply completed."),
         ],
-      };
-      runs.set(next.id, next);
-      return next;
+      });
     },
   };
-
-  async function thisPreview(connection: CloudUpstreamConnection) {
-    return {
-      connectionId: connection.id,
-      sourceCompanyId: connection.companyId,
-      target: connection.target,
-      schemaCompatible: connection.target.schemaMajor === TRANSFER_SCHEMA_MAJOR,
-      summary: await buildSummary(connection.companyId),
-      warnings: buildWarnings(connection.target.schemaMajor),
-      conflicts: [],
-      generatedAt: new Date().toISOString(),
-    };
-  }
 
   async function requireCompany(companyId: string) {
     const row = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, companyId)).then((rows) => rows[0]);
     if (!row) throw notFound("Company was not found");
+  }
+
+  async function getConnectionRow(connectionId: string): Promise<ConnectionRow> {
+    const row = await db
+      .select()
+      .from(cloudUpstreamConnections)
+      .where(eq(cloudUpstreamConnections.id, connectionId))
+      .then((rows) => rows[0]);
+    if (!row) throw notFound("Cloud upstream connection was not found");
+    return row;
+  }
+
+  async function getRunRow(connectionId: string, runId: string): Promise<RunRow> {
+    const row = await db
+      .select()
+      .from(cloudUpstreamRuns)
+      .where(and(eq(cloudUpstreamRuns.id, runId), eq(cloudUpstreamRuns.connectionId, connectionId)))
+      .then((rows) => rows[0]);
+    if (!row) throw notFound("Cloud upstream run was not found");
+    return row;
+  }
+
+  async function updateRun(runId: string, patch: Partial<typeof cloudUpstreamRuns.$inferInsert>): Promise<CloudUpstreamRun> {
+    const [updated] = await db
+      .update(cloudUpstreamRuns)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(cloudUpstreamRuns.id, runId))
+      .returning();
+    if (!updated) throw notFound("Cloud upstream run was not found");
+    return runFromRow(updated);
+  }
+
+  async function localPreview(connection: ConnectionRow): Promise<CloudUpstreamPreview> {
+    return {
+      connectionId: connection.id,
+      sourceCompanyId: connection.companyId,
+      target: targetFromConnectionRow(connection),
+      schemaCompatible: connection.targetSchemaMajor === TRANSFER_SCHEMA.major,
+      summary: await buildSummary(connection.companyId),
+      warnings: buildWarnings(connection.targetSchemaMajor),
+      conflicts: [],
+      generatedAt: new Date().toISOString(),
+    };
   }
 
   async function buildSummary(companyId: string): Promise<CloudUpstreamSummaryCount[]> {
@@ -272,16 +482,60 @@ export function cloudUpstreamService(db: Db, options: { instanceId?: string } = 
       { key: "issues", label: "Issues", count: issueCount },
       { key: "comments", label: "Comments", count: commentCount },
       { key: "routines", label: "Routines", count: routineCount },
-      { key: "warnings", label: "Warnings", count: buildWarnings(TRANSFER_SCHEMA_MAJOR).length },
+      { key: "warnings", label: "Warnings", count: buildWarnings(TRANSFER_SCHEMA.major).length },
     ];
   }
 
-}
-
-function requireConnection(connectionId: string) {
-  const connection = connections.get(connectionId);
-  if (!connection) throw notFound("Cloud upstream connection was not found");
-  return connection;
+  async function buildBundle(connection: ConnectionRow, mode: "preview" | "apply"): Promise<LocalUpstreamExportBundle> {
+    const exported = await portability.exportBundle(connection.companyId, {
+      include: {
+        company: true,
+        agents: true,
+        projects: true,
+        issues: true,
+        skills: true,
+      },
+      expandReferencedSkills: true,
+    });
+    const sourceHash = normalizedContentHash({
+      manifest: exported.manifest,
+      files: exported.files,
+    });
+    const source = {
+      sourceInstanceId: connection.sourceInstanceId,
+      sourceCompanyId: connection.companyId,
+      sourceInstanceKeyFingerprint: connection.sourceInstanceFingerprint,
+      exporterVersion: "paperclip-local-cloud-ui-v1",
+      sourceSchemaVersion: TRANSFER_SCHEMA.version,
+    };
+    const target = {
+      targetStackId: connection.targetStackId,
+      targetCompanyId: connection.targetCompanyId,
+      targetOrigin: connection.targetOrigin,
+      supportedSchemaMajor: connection.targetSchemaMajor,
+    };
+    const idempotencyKey = [
+      mode,
+      connection.sourceInstanceId,
+      connection.companyId,
+      connection.targetStackId,
+      sourceHash,
+    ].join(":");
+    return buildLocalUpstreamExportBundle({
+      source,
+      target,
+      runId: `local-${mode}-${shortHash(idempotencyKey)}`,
+      idempotencyKey,
+      entities: buildEntitiesFromPortableExport(connection.companyId, connection.sourceInstanceId, exported),
+      warnings: exported.warnings.map((message): UpstreamTransferWarning => ({
+        code: "local_company_export_warning",
+        severity: "warning",
+        message,
+      })),
+      featureFlags: ["cloud_sync"],
+      maxEntitiesPerChunk: DEFAULT_MAX_ENTITIES_PER_CHUNK,
+    });
+  }
 }
 
 async function fetchDiscovery(remoteUrl: string): Promise<Record<string, unknown>> {
@@ -309,17 +563,70 @@ function firstPathSegment(pathname: string): string | null {
 function targetFromDiscovery(discovery: Record<string, unknown>): CloudUpstreamTarget {
   const stack = objectField(discovery, "stack");
   const transfer = objectField(discovery, "transfer");
-  const schema = objectField(transfer, "schema");
+  const schema = optionalObject(transfer.schema);
+  const origin = stringField(stack, "origin");
   return {
     stackId: stringField(stack, "id"),
     stackSlug: optionalString(stack.slug),
     stackDisplayName: optionalString(stack.displayName),
     companyId: stringField(stack, "companyId"),
-    primaryHost: stringField(stack, "primaryHost"),
-    origin: stringField(stack, "origin"),
+    primaryHost: optionalString(stack.primaryHost) ?? new URL(origin).host,
+    origin,
     product: optionalString(discovery.product) ?? "Paperclip Cloud",
-    schemaMajor: numberField(schema, "major"),
-    maxChunkBytes: numberField(transfer, "maxChunkBytes"),
+    schemaMajor: optionalNumber(schema?.major) ?? numberField(transfer, "supportedSchemaMajor"),
+    maxChunkBytes: optionalNumber(transfer.maxChunkBytes) ?? 8 * 1024 * 1024,
+  };
+}
+
+function targetFromConnectionRow(row: ConnectionRow): CloudUpstreamTarget {
+  return {
+    stackId: row.targetStackId,
+    stackSlug: row.targetStackSlug,
+    stackDisplayName: row.targetStackDisplayName,
+    companyId: row.targetCompanyId,
+    primaryHost: row.targetPrimaryHost,
+    origin: row.targetOrigin,
+    product: row.targetProduct,
+    schemaMajor: row.targetSchemaMajor,
+    maxChunkBytes: row.targetMaxChunkBytes,
+  };
+}
+
+function connectionFromRow(row: ConnectionRow): CloudUpstreamConnection {
+  return {
+    id: row.id,
+    companyId: row.companyId,
+    remoteUrl: row.remoteUrl,
+    target: targetFromConnectionRow(row),
+    tokenStatus: cloudUpstreamTokenStatus(row.tokenStatus),
+    scopes: row.scopes,
+    authorizedGlobalUserId: row.authorizedGlobalUserId,
+    expiresAt: row.tokenExpiresAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    lastRunId: row.lastRunId,
+  };
+}
+
+function runFromRow(row: RunRow): CloudUpstreamRun {
+  return {
+    id: row.id,
+    connectionId: row.connectionId,
+    companyId: row.companyId,
+    status: cloudUpstreamRunStatus(row.status),
+    activeStep: cloudUpstreamStep(row.activeStep),
+    progressPercent: row.progressPercent,
+    dryRun: row.dryRun,
+    summary: row.summary,
+    warnings: row.warnings,
+    conflicts: row.conflicts,
+    events: row.events,
+    targetUrl: row.targetUrl,
+    report: row.report,
+    retryOfRunId: row.retryOfRunId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    completedAt: row.completedAt?.toISOString() ?? null,
   };
 }
 
@@ -330,7 +637,8 @@ function scopesFromDiscovery(discovery: Record<string, unknown>): string[] {
 }
 
 function consentUrlFromDiscovery(discovery: Record<string, unknown>): string {
-  return stringField(objectField(objectField(discovery, "auth"), "pkce"), "consentUrl");
+  const pkce = objectField(objectField(discovery, "auth"), "pkce");
+  return optionalString(pkce.consentUrl) ?? stringField(pkce, "authorizeUrl");
 }
 
 function tokenUrlFromDiscovery(discovery: Record<string, unknown>): string {
@@ -358,28 +666,286 @@ function buildWarnings(schemaMajor: number): CloudUpstreamWarning[] {
       detail: "The push carries secret requirements only. Configure cloud secrets before activating automations.",
     },
   ];
-  if (schemaMajor !== TRANSFER_SCHEMA_MAJOR) {
+  if (schemaMajor !== TRANSFER_SCHEMA.major) {
     warnings.unshift({
       code: "schema_mismatch",
       severity: "blocker",
       title: "Cloud stack upgrade required",
-      detail: `This local build uses upstream schema ${TRANSFER_SCHEMA_MAJOR}, but the cloud stack reports schema ${schemaMajor}.`,
+      detail: `This local build uses upstream schema ${TRANSFER_SCHEMA.major}, but the cloud stack reports schema ${schemaMajor}.`,
     });
   }
   return warnings;
 }
 
-function buildCompletedEvents(now: string, retryOfRunId: string | null): CloudUpstreamRunEvent[] {
-  return [
-    event(now, "connect", "completed", "Connected to the target Paperclip Cloud stack."),
-    event(now, "scan", "completed", "Scanned the local company inventory."),
-    event(now, "preview", "completed", "Generated the conflict and warning preview."),
-    retryOfRunId
-      ? event(now, "push", "retrying", `Retry reused ledger state from run ${retryOfRunId}.`)
-      : event(now, "push", "completed", "Pushed mapped objects without duplicate creation."),
-    event(now, "verify", "completed", "Verified summary counts and generated a run report."),
-    event(now, "activate", "completed", "Activation checklist is ready for manual unpause decisions."),
+type LocalUpstreamExportEntityInput = {
+  key: SourceEntityKey;
+  body: Record<string, unknown>;
+  dependencies?: SourceEntityKey[];
+  warnings?: UpstreamTransferWarning[];
+  conflictKeys?: string[];
+};
+
+function buildEntitiesFromPortableExport(
+  localCompanyId: string,
+  sourceInstanceId: string,
+  exported: CompanyPortabilityExportResult,
+): LocalUpstreamExportEntityInput[] {
+  const companyKey: SourceEntityKey = {
+    sourceInstanceId,
+    sourceCompanyId: localCompanyId,
+    sourceEntityType: "company",
+    sourceEntityId: localCompanyId,
+    sourceNaturalKey: exported.manifest.company?.name ?? localCompanyId,
+  };
+  const entities: LocalUpstreamExportEntityInput[] = [
+    {
+      key: companyKey,
+      body: {
+        kind: "paperclip_company_portability_manifest",
+        manifest: exported.manifest,
+        rootPath: exported.rootPath,
+        paperclipExtensionPath: exported.paperclipExtensionPath,
+        fileCount: Object.keys(exported.files).length,
+      },
+      conflictKeys: [`company:${companyKey.sourceNaturalKey ?? localCompanyId}`],
+    },
   ];
+
+  for (const [filePath, entry] of Object.entries(exported.files).sort(([left], [right]) => left.localeCompare(right))) {
+    entities.push({
+      key: {
+        sourceInstanceId,
+        sourceCompanyId: localCompanyId,
+        sourceEntityType: "company_setting",
+        sourceEntityId: shortHash(filePath),
+        sourceNaturalKey: filePath,
+      },
+      body: {
+        kind: "paperclip_portable_file",
+        path: filePath,
+        entry: normalizePortableFileEntry(entry),
+      },
+      dependencies: [companyKey],
+      conflictKeys: [`portable_file:${filePath}`],
+    });
+  }
+  return entities;
+}
+
+function normalizePortableFileEntry(entry: CompanyPortabilityFileEntry): Record<string, unknown> {
+  if (typeof entry === "string") {
+    return { encoding: "utf8", data: entry };
+  }
+  return { ...entry };
+}
+
+function buildLocalUpstreamExportBundle(input: {
+  source: UpstreamTransferManifest["source"];
+  target: UpstreamTransferManifest["target"];
+  runId: string;
+  idempotencyKey: string;
+  entities: LocalUpstreamExportEntityInput[];
+  warnings?: UpstreamTransferWarning[];
+  featureFlags?: string[];
+  maxEntitiesPerChunk?: number;
+}): LocalUpstreamExportBundle {
+  const entities = input.entities.map<LocalUpstreamExportEntity>((entity) => ({
+    record: {
+      key: entity.key,
+      contentHash: normalizedContentHash(entity.body),
+      dependencies: entity.dependencies ?? [],
+      warnings: entity.warnings ?? [],
+    },
+    body: entity.body,
+    conflictKeys: entity.conflictKeys,
+  }));
+  const chunksWithoutManifestHash = buildLocalChunks(entities, input.maxEntitiesPerChunk ?? DEFAULT_MAX_ENTITIES_PER_CHUNK);
+  const manifestWithoutHash = {
+    schema: TRANSFER_SCHEMA,
+    source: input.source,
+    target: input.target,
+    runId: input.runId,
+    idempotencyKey: input.idempotencyKey,
+    generatedAt: new Date(0).toISOString(),
+    entityCount: entities.length,
+    entities: entities.map((entity) => entity.record),
+    chunks: chunksWithoutManifestHash.map(({ payload: _payload, manifestHash: _manifestHash, ...chunk }) => chunk),
+    warnings: input.warnings ?? [],
+    featureFlags: (input.featureFlags ?? ["cloud_sync"]).slice().sort(),
+  };
+  const manifestHash = normalizedContentHash(manifestWithoutHash);
+  const chunks = chunksWithoutManifestHash.map((chunk) => ({ ...chunk, manifestHash }));
+  return {
+    manifest: {
+      ...manifestWithoutHash,
+      chunks: chunks.map(({ payload: _payload, ...chunk }) => chunk),
+      manifestHash,
+    },
+    entities,
+    chunks,
+  };
+}
+
+function buildLocalChunks(entities: LocalUpstreamExportEntity[], maxEntitiesPerChunk: number): LocalUpstreamExportChunk[] {
+  if (!Number.isInteger(maxEntitiesPerChunk) || maxEntitiesPerChunk < 1) {
+    throw new Error("maxEntitiesPerChunk must be a positive integer");
+  }
+  if (entities.length === 0) return [];
+
+  const groups: LocalUpstreamExportEntity[][] = [];
+  for (let index = 0; index < entities.length; index += maxEntitiesPerChunk) {
+    groups.push(entities.slice(index, index + maxEntitiesPerChunk));
+  }
+
+  return groups.map((group, index) => {
+    const payload = {
+      entityKeys: group.map((entity) => entity.record.key),
+    };
+    return {
+      chunkIndex: index,
+      totalChunks: groups.length,
+      byteLength: Buffer.byteLength(canonicalJson(payload)),
+      sha256: normalizedContentHash(payload),
+      manifestHash: "sha256:" as NormalizedSha256,
+      payload,
+    };
+  });
+}
+
+async function remoteGet(connection: ConnectionRow, path: string): Promise<unknown> {
+  const response = await fetch(`${connection.targetOrigin}${path}`, {
+    method: "GET",
+    headers: proofHeaders(connection, "GET", path),
+  });
+  return parseRemoteResponse(response);
+}
+
+async function remotePost(connection: ConnectionRow, path: string, body: unknown): Promise<unknown> {
+  const response = await fetch(`${connection.targetOrigin}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...proofHeaders(connection, "POST", path),
+    },
+    body: JSON.stringify(body),
+  });
+  return parseRemoteResponse(response);
+}
+
+function proofHeaders(connection: ConnectionRow, method: string, pathAndSearch: string): Record<string, string> {
+  if (!connection.accessToken || !connection.tokenId) {
+    throw badRequest("Cloud upstream connection is missing an import token");
+  }
+  const timestamp = new Date().toISOString();
+  const nonce = crypto.randomUUID();
+  const payload = [
+    method,
+    new URL(connection.targetOrigin).host.toLowerCase(),
+    pathAndSearch,
+    connection.tokenId,
+    connection.sourceInstanceId,
+    timestamp,
+    nonce,
+  ].join("\n");
+  return {
+    Authorization: `Bearer ${connection.accessToken}`,
+    "X-Paperclip-Upstream-Source-Instance-Id": connection.sourceInstanceId,
+    "X-Paperclip-Upstream-Proof-Timestamp": timestamp,
+    "X-Paperclip-Upstream-Proof-Nonce": nonce,
+    "X-Paperclip-Upstream-Proof-Signature": sign(
+      null,
+      Buffer.from(payload, "utf8"),
+      connection.privateKeyPem,
+    ).toString("base64url"),
+  };
+}
+
+async function parseRemoteResponse(response: Response): Promise<unknown> {
+  const text = await response.text();
+  const parsed = text.trim() ? safeParseJson(text) : {};
+  if (!response.ok) {
+    const message = typeof parsed === "object" && parsed !== null && "error" in parsed
+      ? String((parsed as { error: unknown }).error)
+      : `Cloud upstream request failed: ${response.status}`;
+    throw badRequest(message, parsed);
+  }
+  return parsed;
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw badRequest((payload as { error?: string } | null)?.error ?? `Cloud upstream request failed: ${response.status}`);
+  }
+  return payload as T;
+}
+
+function remoteRunIdFromResponse(value: unknown): string {
+  const record = asRecord(value);
+  const run = asRecord(record.run);
+  const id = optionalString(run.id);
+  if (!id) throw badRequest("Remote upstream importer did not return a run id");
+  return id;
+}
+
+function warningsFromRemote(value: unknown): CloudUpstreamWarning[] {
+  const record = asRecord(value);
+  const warnings = Array.isArray(record.warnings) ? record.warnings : [];
+  return warnings.map((warning, index): CloudUpstreamWarning => {
+    const item = asRecord(warning);
+    const code = optionalString(item.code) ?? `remote_warning_${index}`;
+    const severity = item.severity === "blocker" ? "blocker" : "warning";
+    const message = optionalString(item.message) ?? optionalString(item.detail) ?? "Remote importer warning.";
+    return {
+      code,
+      severity,
+      title: titleFromCode(code),
+      detail: message,
+    };
+  });
+}
+
+function conflictsFromRemote(value: unknown): CloudUpstreamConflict[] {
+  const record = asRecord(value);
+  const conflicts = Array.isArray(record.conflicts) ? record.conflicts : [];
+  return conflicts.map((conflict, index): CloudUpstreamConflict => {
+    const item = asRecord(conflict);
+    const source = asRecord(item.source);
+    return {
+      id: optionalString(item.id) ?? `remote-conflict-${index}`,
+      entityType: optionalString(item.entityType) ?? optionalString(source.sourceEntityType) ?? "entity",
+      sourceLabel: optionalString(item.sourceLabel) ?? optionalString(source.sourceNaturalKey) ?? optionalString(source.sourceEntityId) ?? "Source entity",
+      targetLabel: optionalString(item.targetLabel) ?? optionalString(item.targetEntityId) ?? "Cloud entity",
+      plannedAction: "blocked",
+      reason: optionalString(item.reason) ?? "Remote importer reported a conflict.",
+    };
+  });
+}
+
+function eventsFromRemote(value: unknown): CloudUpstreamRunEvent[] {
+  const record = asRecord(value);
+  const events = Array.isArray(record.events) ? record.events : [];
+  return events.slice(-25).map((remote, index) => {
+    const item = asRecord(remote);
+    const action = optionalString(item.action) ?? "updated";
+    return event(
+      optionalString(item.createdAt) ?? new Date().toISOString(),
+      "verify",
+      action.includes("created") ? "created" : "updated",
+      `Cloud importer ${action.replace(/_/g, " ")}${index >= 0 ? "." : "."}`,
+    );
+  });
+}
+
+function mergeWarnings(base: CloudUpstreamWarning[], extra: CloudUpstreamWarning[]): CloudUpstreamWarning[] {
+  const byCode = new Map<string, CloudUpstreamWarning>();
+  for (const warning of [...base, ...extra]) byCode.set(warning.code, warning);
+  return [...byCode.values()];
 }
 
 function event(
@@ -397,17 +963,32 @@ function event(
   };
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    throw badRequest((payload as { error?: string } | null)?.error ?? `Cloud upstream request failed: ${response.status}`);
-  }
-  return payload as T;
+function normalizedContentHash(value: unknown): NormalizedSha256 {
+  return `sha256:${crypto.createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortJson(value));
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, sortJson(entry)]),
+  );
+}
+
+function shortHash(value: string): string {
+  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function titleFromCode(code: string): string {
+  return code
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function objectField(value: Record<string, unknown>, key: string): Record<string, unknown> {
@@ -436,4 +1017,40 @@ function numberField(value: Record<string, unknown>, key: string): number {
 
 function optionalString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function optionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function optionalObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function safeParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function cloudUpstreamTokenStatus(value: string): CloudUpstreamConnection["tokenStatus"] {
+  return value === "connected" || value === "expired" || value === "revoked" ? value : "pending";
+}
+
+function cloudUpstreamRunStatus(value: string): CloudUpstreamRun["status"] {
+  return value === "previewed" || value === "running" || value === "succeeded" || value === "failed" || value === "cancelled"
+    ? value
+    : "failed";
+}
+
+function cloudUpstreamStep(value: string): CloudUpstreamRun["activeStep"] {
+  return value === "connect" || value === "scan" || value === "preview" || value === "push" || value === "verify" || value === "activate"
+    ? value
+    : "push";
 }
