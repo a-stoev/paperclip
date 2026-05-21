@@ -752,6 +752,28 @@ describe("NewIssueDialog", () => {
     act(() => root.unmount());
   });
 
+  it("keeps priority under the mobile overflow menu", async () => {
+    const { root } = renderDialog(container);
+    await flush();
+
+    const priorityChip = container.querySelector('[data-testid="new-issue-priority-chip"]');
+    expect(priorityChip?.className).toContain("hidden");
+    expect(priorityChip?.className).toContain("sm:inline-flex");
+
+    const highPriorityOption = container.querySelector('[data-testid="new-issue-more-priority-high"]');
+    expect(highPriorityOption?.textContent).toContain("High");
+
+    await act(async () => {
+      highPriorityOption?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const selectedHighPriorityOption = container.querySelector('[data-testid="new-issue-more-priority-high"]');
+    expect(selectedHighPriorityOption?.className).toContain("bg-accent");
+
+    act(() => root.unmount());
+  });
+
   it("allows editor autocomplete portal pointer events inside the modal", async () => {
     const { root } = renderDialog(container);
     await flush();
