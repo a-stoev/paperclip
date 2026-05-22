@@ -73,6 +73,21 @@ export class CapabilityDeniedError extends Error {
   }
 }
 
+/**
+ * Thrown when a worker→host call tries to escape the company scope attached to
+ * the current host invocation.
+ */
+export class InvocationScopeDeniedError extends Error {
+  override readonly name = "InvocationScopeDeniedError";
+  readonly code = PLUGIN_RPC_ERROR_CODES.CAPABILITY_DENIED;
+
+  constructor(pluginId: string, method: string, requestedCompanyId: string, allowedCompanyId: string) {
+    super(
+      `Plugin "${pluginId}" cannot call "${method}" for company "${requestedCompanyId}" during invocation scoped to company "${allowedCompanyId}"`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Host service interfaces
 // ---------------------------------------------------------------------------
@@ -292,7 +307,16 @@ export interface HostClientFactoryOptions {
  */
 type HostHandler<M extends WorkerToHostMethodName> = (
   params: WorkerToHostMethods[M][0],
+  context?: HostHandlerContext,
 ) => Promise<WorkerToHostMethods[M][1]>;
+
+export interface HostInvocationScope {
+  companyId?: string | null;
+}
+
+export interface HostHandlerContext {
+  invocationScope?: HostInvocationScope | null;
+}
 
 /**
  * A complete map of all worker→host method handlers.
@@ -474,6 +498,43 @@ export function createHostClientHandlers(
     throw new CapabilityDeniedError(pluginId, method, required);
   }
 
+  function nonEmptyString(value: unknown): string | null {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function invocationCompanyId(context: HostHandlerContext | undefined): string | null {
+    return nonEmptyString(context?.invocationScope?.companyId);
+  }
+
+  function requestedCompanyId(params: unknown): string | null {
+    if (!params || typeof params !== "object") return null;
+    const record = params as Record<string, unknown>;
+    const directCompanyId = nonEmptyString(record.companyId);
+    if (directCompanyId) return directCompanyId;
+    if (record.scopeKind === "company") return nonEmptyString(record.scopeId);
+    return null;
+  }
+
+  function assertInvocationCompanyScope(
+    method: WorkerToHostMethodName,
+    params: unknown,
+    context: HostHandlerContext | undefined,
+  ): void {
+    const allowedCompanyId = invocationCompanyId(context);
+    if (!allowedCompanyId) return;
+    const companyId = requestedCompanyId(params);
+    if (!companyId || companyId === allowedCompanyId) return;
+    throw new InvocationScopeDeniedError(pluginId, method, companyId, allowedCompanyId);
+  }
+
+  function filterCompaniesToInvocationScope<T extends { id: string }>(
+    rows: T[],
+    context: HostHandlerContext | undefined,
+  ): T[] {
+    const companyId = invocationCompanyId(context);
+    return companyId ? rows.filter((row) => row.id === companyId) : rows;
+  }
+
   /**
    * Create a capability-gated proxy handler for a method.
    *
@@ -485,9 +546,10 @@ export function createHostClientHandlers(
     method: M,
     handler: HostHandler<M>,
   ): HostHandler<M> {
-    return async (params: WorkerToHostMethods[M][0]) => {
+    return async (params: WorkerToHostMethods[M][0], context?: HostHandlerContext) => {
       requireCapability(method);
-      return handler(params);
+      assertInvocationCompanyScope(method, params, context);
+      return handler(params, context);
     };
   }
 
@@ -591,8 +653,8 @@ export function createHostClientHandlers(
     }),
 
     // Companies
-    "companies.list": gated("companies.list", async (params) => {
-      return services.companies.list(params);
+    "companies.list": gated("companies.list", async (params, context) => {
+      return filterCompaniesToInvocationScope(await services.companies.list(params), context);
     }),
     "companies.get": gated("companies.get", async (params) => {
       return services.companies.get(params);

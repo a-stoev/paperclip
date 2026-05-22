@@ -80,6 +80,19 @@ export const JSONRPC_VERSION = "2.0" as const;
 export type JsonRpcId = string | number;
 
 /**
+ * Host-owned scope attached to a host→worker invocation. Workers may echo the
+ * invocation id on nested worker→host calls, but they never author this scope.
+ */
+export interface JsonRpcInvocationScope {
+  readonly companyId?: string | null;
+}
+
+export interface JsonRpcInvocationContext {
+  readonly id: string;
+  readonly scope: JsonRpcInvocationScope;
+}
+
+/**
  * A JSON-RPC 2.0 request message.
  *
  * The host sends requests to the worker (or vice versa) and expects a
@@ -96,6 +109,10 @@ export interface JsonRpcRequest<
   readonly method: TMethod;
   /** Structured parameters for the method call. */
   readonly params: TParams;
+  /** Host-owned invocation metadata sent only from host→worker requests. */
+  readonly paperclipInvocation?: JsonRpcInvocationContext;
+  /** Invocation id echoed by SDK worker→host calls made inside that request. */
+  readonly paperclipInvocationId?: string;
 }
 
 /**
@@ -313,11 +330,35 @@ export interface GetDataParams {
  *
  * @see PLUGIN_SPEC.md §13.9 — `performAction`
  */
+export type PluginPerformActionActorType = "user" | "agent" | "system";
+
+export interface PluginPerformActionActorContext {
+  /** Authenticated principal type resolved by the Paperclip host. */
+  type: PluginPerformActionActorType;
+  /** Authenticated board user id when `type === "user"`, otherwise null. */
+  userId: string | null;
+  /** Authenticated agent id when `type === "agent"`, otherwise null. */
+  agentId: string | null;
+  /** Authenticated heartbeat/run id when available. */
+  runId: string | null;
+  /** Company id authorized by the host bridge for this action, when applicable. */
+  companyId: string | null;
+}
+
+export interface PluginPerformActionContext {
+  /** Immutable authenticated actor context supplied by the host. */
+  actor: Readonly<PluginPerformActionActorContext>;
+  /** Convenience alias for `actor.companyId`. */
+  companyId: string | null;
+}
+
 export interface PerformActionParams {
   /** Plugin-defined action key (e.g. `"resync"`). */
   key: string;
   /** Action parameters from the UI. */
   params: Record<string, unknown>;
+  /** Authenticated actor context resolved by the host, never by caller params. */
+  actorContext?: PluginPerformActionActorContext | null;
   /** Optional launcher/container metadata from the host render environment. */
   renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
 }

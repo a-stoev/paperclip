@@ -55,7 +55,7 @@ import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
-import type { ToolRunContext } from "@paperclipai/plugin-sdk";
+import type { PluginPerformActionActorContext, ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import {
   assertAuthenticated,
@@ -570,6 +570,43 @@ export function pluginRoutes(
     }
     assertCompanyAccess(req, companyId);
     return companyId;
+  }
+
+  function performActionActorContext(req: Request, companyId: string | undefined): PluginPerformActionActorContext {
+    const scopedCompanyId = companyId ?? null;
+    if (req.actor.type === "agent") {
+      return {
+        type: "agent",
+        userId: null,
+        agentId: req.actor.agentId ?? null,
+        runId: req.actor.runId ?? null,
+        companyId: scopedCompanyId,
+      };
+    }
+    if (req.actor.type === "board") {
+      return {
+        type: "user",
+        userId: req.actor.userId ?? "board",
+        agentId: null,
+        runId: req.actor.runId ?? null,
+        companyId: scopedCompanyId,
+      };
+    }
+    return {
+      type: "system",
+      userId: null,
+      agentId: null,
+      runId: req.actor.runId ?? null,
+      companyId: scopedCompanyId,
+    };
+  }
+
+  function actionParamsWithAuthorizedCompanyScope(
+    params: Record<string, unknown> | undefined,
+    companyId: string | undefined,
+  ): Record<string, unknown> {
+    const base = params ?? {};
+    return companyId === undefined ? base : { ...base, companyId };
   }
 
   async function validateToolRunContextScope(runContext: ToolRunContext): Promise<string | null> {
@@ -1170,7 +1207,7 @@ export function pluginRoutes(
    * @see PLUGIN_SPEC.md §19.7 — Error Propagation Through The Bridge
    */
   router.post("/plugins/:pluginId/bridge/action", async (req, res) => {
-    assertBoardOrgAccess(req);
+    assertAuthenticated(req);
 
     if (!bridgeDeps) {
       res.status(501).json({ error: "Plugin bridge is not enabled" });
@@ -1208,7 +1245,7 @@ export function pluginRoutes(
       return;
     }
 
-    assertPluginBridgeScope(req, body.companyId);
+    const companyId = assertPluginBridgeScope(req, body.companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1216,7 +1253,8 @@ export function pluginRoutes(
         "performAction",
         {
           key: body.key,
-          params: body.params ?? {},
+          params: actionParamsWithAuthorizedCompanyScope(body.params, companyId),
+          actorContext: performActionActorContext(req, companyId),
           renderEnvironment: body.renderEnvironment ?? null,
         },
       );
@@ -1352,7 +1390,7 @@ export function pluginRoutes(
    * @see PLUGIN_SPEC.md §19.7 — Error Propagation Through The Bridge
    */
   router.post("/plugins/:pluginId/actions/:key", async (req, res) => {
-    assertBoardOrgAccess(req);
+    assertAuthenticated(req);
 
     if (!bridgeDeps) {
       res.status(501).json({ error: "Plugin bridge is not enabled" });
@@ -1390,7 +1428,7 @@ export function pluginRoutes(
       renderEnvironment?: PluginLauncherRenderContextSnapshot | null;
     } | undefined;
 
-    assertPluginBridgeScope(req, body?.companyId);
+    const companyId = assertPluginBridgeScope(req, body?.companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1398,7 +1436,8 @@ export function pluginRoutes(
         "performAction",
         {
           key,
-          params: body?.params ?? {},
+          params: actionParamsWithAuthorizedCompanyScope(body?.params, companyId),
+          actorContext: performActionActorContext(req, companyId),
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );

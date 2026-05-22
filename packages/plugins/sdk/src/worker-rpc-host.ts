@@ -35,6 +35,7 @@
  */
 
 import fs from "node:fs";
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -76,6 +77,8 @@ import type {
   RunJobParams,
   GetDataParams,
   PerformActionParams,
+  PluginPerformActionActorContext,
+  PluginPerformActionContext,
   ExecuteToolParams,
   PluginEnvironmentAcquireLeaseParams,
   PluginEnvironmentDestroyLeaseParams,
@@ -285,7 +288,10 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
   const jobHandlers = new Map<string, (job: PluginJobContext) => Promise<void>>();
   const launcherRegistrations = new Map<string, PluginLauncherRegistration>();
   const dataHandlers = new Map<string, (params: Record<string, unknown>) => Promise<unknown>>();
-  const actionHandlers = new Map<string, (params: Record<string, unknown>) => Promise<unknown>>();
+  const actionHandlers = new Map<
+    string,
+    (params: Record<string, unknown>, context: PluginPerformActionContext) => Promise<unknown>
+  >();
   const toolHandlers = new Map<string, {
     declaration: Pick<import("@paperclipai/shared").PluginToolDeclaration, "displayName" | "description" | "parametersSchema">;
     fn: (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>;
@@ -301,6 +307,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
   }>();
   let nextOutboundId = 1;
   const MAX_OUTBOUND_ID = Number.MAX_SAFE_INTEGER - 1;
+  const invocationStorage = new AsyncLocalStorage<string | null>();
 
   // -----------------------------------------------------------------------
   // Outbound messaging (worker → host)
@@ -366,7 +373,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
       try {
         const request = createRequest(method, params, id);
-        sendMessage(request);
+        const invocationId = invocationStorage.getStore();
+        sendMessage(invocationId ? { ...request, paperclipInvocationId: invocationId } : request);
       } catch (err) {
         settle(reject, err instanceof Error ? err : new Error(String(err)));
       }
@@ -1093,7 +1101,10 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       },
 
       actions: {
-        register(key: string, handler: (params: Record<string, unknown>) => Promise<unknown>): void {
+        register(
+          key: string,
+          handler: (params: Record<string, unknown>, context: PluginPerformActionContext) => Promise<unknown>,
+        ): void {
           actionHandlers.set(key, handler);
         },
       },
@@ -1173,22 +1184,33 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
    */
   async function handleHostRequest(request: JsonRpcRequest): Promise<void> {
     const { id, method, params } = request;
+    const invocationId = typeof request.paperclipInvocation?.id === "string"
+      ? request.paperclipInvocation.id
+      : null;
 
-    try {
-      const result = await dispatchMethod(method, params);
-      sendMessage(createSuccessResponse(id, result ?? null));
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      // Propagate specific error codes from handler errors (e.g.
-      // METHOD_NOT_FOUND, METHOD_NOT_IMPLEMENTED) — fall back to
-      // WORKER_ERROR for untyped exceptions.
-      const errorCode =
-        typeof (err as any)?.code === "number"
-          ? (err as any).code
-          : PLUGIN_RPC_ERROR_CODES.WORKER_ERROR;
+    const execute = async (): Promise<void> => {
+      try {
+        const result = await dispatchMethod(method, params);
+        sendMessage(createSuccessResponse(id, result ?? null));
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        // Propagate specific error codes from handler errors (e.g.
+        // METHOD_NOT_FOUND, METHOD_NOT_IMPLEMENTED) — fall back to
+        // WORKER_ERROR for untyped exceptions.
+        const errorCode =
+          typeof (err as any)?.code === "number"
+            ? (err as any).code
+            : PLUGIN_RPC_ERROR_CODES.WORKER_ERROR;
 
-      sendMessage(createErrorResponse(id, errorCode, errorMessage));
+        sendMessage(createErrorResponse(id, errorCode, errorMessage));
+      }
+    };
+
+    if (invocationId) {
+      await invocationStorage.run(invocationId, execute);
+      return;
     }
+    await execute();
   }
 
   /**
@@ -1420,6 +1442,32 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     );
   }
 
+  function stringOrNull(value: unknown): string | null {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function actorTypeOrSystem(value: unknown): PluginPerformActionActorContext["type"] {
+    return value === "user" || value === "agent" || value === "system" ? value : "system";
+  }
+
+  function actionContextFromParams(params: PerformActionParams): PluginPerformActionContext {
+    const rawActor = params.actorContext && typeof params.actorContext === "object"
+      ? params.actorContext
+      : null;
+    const legacyCompanyId = stringOrNull(params.params.companyId);
+    const actor = Object.freeze({
+      type: actorTypeOrSystem(rawActor?.type),
+      userId: stringOrNull(rawActor?.userId),
+      agentId: stringOrNull(rawActor?.agentId),
+      runId: stringOrNull(rawActor?.runId),
+      companyId: stringOrNull(rawActor?.companyId) ?? legacyCompanyId,
+    });
+    return Object.freeze({
+      actor,
+      companyId: actor.companyId,
+    });
+  }
+
   async function handlePerformAction(params: PerformActionParams): Promise<unknown> {
     const handler = actionHandlers.get(params.key);
     if (!handler) {
@@ -1429,6 +1477,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       params.renderEnvironment === undefined
         ? params.params
         : { ...params.params, renderEnvironment: params.renderEnvironment },
+      actionContextFromParams(params),
     );
   }
 

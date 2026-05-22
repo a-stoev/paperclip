@@ -58,6 +58,7 @@ export {
   createHostClientHandlers,
   getRequiredCapability,
   CapabilityDeniedError,
+  InvocationScopeDeniedError,
 } from "./host-client-factory.js";
 
 // JSON-RPC protocol helpers and constants
@@ -128,6 +129,8 @@ export type {
 // JSON-RPC protocol types
 export type {
   JsonRpcId,
+  JsonRpcInvocationScope,
+  JsonRpcInvocationContext,
   JsonRpcRequest,
   JsonRpcSuccessResponse,
   JsonRpcError,
@@ -145,6 +148,9 @@ export type {
   RunJobParams,
   GetDataParams,
   PerformActionParams,
+  PluginPerformActionActorType,
+  PluginPerformActionActorContext,
+  PluginPerformActionContext,
   ExecuteToolParams,
   PluginEnvironmentDiagnostic,
   PluginEnvironmentDriverBaseParams,

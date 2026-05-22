@@ -19,6 +19,7 @@
  */
 
 import { fork, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
@@ -102,12 +103,21 @@ export type WorkerStatus =
   | "crashed"
   | "backoff";
 
+export interface WorkerInvocationScope {
+  companyId?: string | null;
+}
+
+export interface WorkerToHostHandlerContext {
+  invocationScope?: WorkerInvocationScope | null;
+}
+
 /**
  * Worker-to-host method handler. The host registers these to service calls
  * that the plugin worker makes back to the host (e.g. state.get, events.emit).
  */
 export type WorkerToHostHandler<M extends WorkerToHostMethodName> = (
   params: WorkerToHostMethods[M][0],
+  context?: WorkerToHostHandlerContext,
 ) => Promise<WorkerToHostMethods[M][1]>;
 
 /**
@@ -199,6 +209,8 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
   /** Timestamp when the request was sent. */
   sentAt: number;
+  /** Active host-owned invocation id attached to this host→worker call. */
+  invocationId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +391,7 @@ export function createPluginWorkerHandle(
   // Pending RPC requests awaiting a response
   const pendingRequests = new Map<string | number, PendingRequest>();
   let nextRequestId = 1;
+  const activeInvocationScopes = new Map<string, WorkerInvocationScope>();
 
   // Optional methods reported by the worker during initialization
   let supportedMethods: string[] = [];
@@ -422,6 +435,38 @@ export function createPluginWorkerHandle(
     }
     const serialized = serializeMessage(message as any);
     childProcess.stdin.write(serialized);
+  }
+
+  function stringOrNull(value: unknown): string | null {
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+  }
+
+  function invocationScopeForCall(
+    method: HostToWorkerMethodName,
+    params: unknown,
+  ): WorkerInvocationScope | null {
+    if (method !== "performAction" || !params || typeof params !== "object") return null;
+    const actorContext = (params as { actorContext?: { companyId?: unknown } | null }).actorContext;
+    const companyId = stringOrNull(actorContext?.companyId);
+    return companyId ? { companyId } : null;
+  }
+
+  function invocationContextForWorkerRequest(request: JsonRpcRequest): WorkerToHostHandlerContext | undefined {
+    const invocationId = stringOrNull(request.paperclipInvocationId);
+    if (invocationId) {
+      const invocationScope = activeInvocationScopes.get(invocationId);
+      if (!invocationScope) {
+        throw new Error("Worker host request referenced an unknown or expired invocation scope");
+      }
+      return { invocationScope };
+    }
+    if (activeInvocationScopes.size === 1) {
+      return { invocationScope: [...activeInvocationScopes.values()][0] };
+    }
+    if (activeInvocationScopes.size > 1) {
+      throw new Error("Worker host request omitted invocation scope while multiple scoped invocations are active");
+    }
+    return undefined;
   }
 
   // -----------------------------------------------------------------------
@@ -481,7 +526,7 @@ export function createPluginWorkerHandle(
   async function handleWorkerRequest(request: JsonRpcRequest): Promise<void> {
     const method = request.method as WorkerToHostMethodName;
     const handler = options.hostHandlers[method] as
-      | ((params: unknown) => Promise<unknown>)
+      | ((params: unknown, context?: WorkerToHostHandlerContext) => Promise<unknown>)
       | undefined;
 
     if (!handler) {
@@ -501,7 +546,7 @@ export function createPluginWorkerHandle(
     }
 
     try {
-      const result = await handler(request.params);
+      const result = await handler(request.params, invocationContextForWorkerRequest(request));
       sendMessage({
         jsonrpc: JSONRPC_VERSION,
         id: request.id,
@@ -751,6 +796,7 @@ export function createPluginWorkerHandle(
   function rejectAllPending(error: Error): void {
     for (const [id, pending] of pendingRequests) {
       clearTimeout(pending.timer);
+      if (pending.invocationId) activeInvocationScopes.delete(pending.invocationId);
       pending.resolve(
         createErrorResponse(
           pending.id,
@@ -760,6 +806,7 @@ export function createPluginWorkerHandle(
       );
     }
     pendingRequests.clear();
+    activeInvocationScopes.clear();
   }
 
   // -----------------------------------------------------------------------
@@ -1020,6 +1067,9 @@ export function createPluginWorkerHandle(
 
       const id = nextRequestId++;
       const timeout = Math.min(timeoutMs ?? rpcTimeoutMs, MAX_RPC_TIMEOUT_MS);
+      const invocationScope = invocationScopeForCall(method, params);
+      const invocation = invocationScope ? { id: randomUUID(), scope: invocationScope } : null;
+      if (invocation) activeInvocationScopes.set(invocation.id, invocation.scope);
 
       // Guard against double-settlement. When a process exits all pending
       // requests are rejected via rejectAllPending(), but the timeout timer
@@ -1032,6 +1082,7 @@ export function createPluginWorkerHandle(
         settled = true;
         clearTimeout(timer);
         pendingRequests.delete(id);
+        if (invocation) activeInvocationScopes.delete(invocation.id);
         fn(value);
       };
 
@@ -1059,16 +1110,18 @@ export function createPluginWorkerHandle(
         },
         timer,
         sentAt: Date.now(),
+        invocationId: invocation?.id,
       };
 
       pendingRequests.set(id, pending);
 
       try {
         const request = createRequest(method, params, id);
-        sendMessage(request);
+        sendMessage(invocation ? { ...request, paperclipInvocation: invocation } : request);
       } catch (err) {
         clearTimeout(timer);
         pendingRequests.delete(id);
+        if (invocation) activeInvocationScopes.delete(invocation.id);
         reject(
           new Error(
             `Failed to send "${method}" to worker: ${
