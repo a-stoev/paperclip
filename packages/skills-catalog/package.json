@@ -39,11 +39,11 @@
     "generated"
   ],
   "scripts": {
-    "build": "pnpm run build:manifest && pnpm -w exec tsc",
+    "build": "pnpm run build:manifest && tsc -p tsconfig.json",
     "build:manifest": "node ../../cli/node_modules/tsx/dist/cli.mjs scripts/build-catalog-manifest.ts",
     "clean": "rm -rf dist",
     "test": "pnpm -w exec vitest run --root packages/skills-catalog --config vitest.config.ts",
-    "typecheck": "pnpm -w exec tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "validate": "node ../../cli/node_modules/tsx/dist/cli.mjs scripts/validate-catalog.ts"
   }
 }
