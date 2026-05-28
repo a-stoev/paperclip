@@ -134,7 +134,10 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       metadata: { sourceKind: "github", owner: "acme", repo: "remote-skill" },
     });
 
-    await expect(svc.auditSkill(companyId, skillId)).resolves.toBeNull();
+    await expect(svc.auditSkill(companyId, skillId)).rejects.toMatchObject({
+      status: 422,
+      message: "Only local-path and catalog-managed company skills support audit.",
+    });
     await expect(svc.getById(companyId, skillId)).resolves.toMatchObject({
       metadata: { sourceKind: "github", owner: "acme", repo: "remote-skill" },
     });

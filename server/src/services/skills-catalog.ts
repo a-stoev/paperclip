@@ -8,6 +8,7 @@ import type {
   CatalogSkillListQuery,
 } from "@paperclipai/shared";
 import { conflict, notFound } from "../errors.js";
+import { normalizePortablePath } from "./portable-path.js";
 
 interface CatalogManifestFile {
   packageName: string;
@@ -60,19 +61,6 @@ function getCatalogManifest() {
 
 function getCatalogSkills() {
   return getCatalogManifest().skills;
-}
-
-function normalizePortablePath(input: string) {
-  const parts: string[] = [];
-  for (const segment of input.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "").split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === "..") {
-      if (parts.length > 0) parts.pop();
-      continue;
-    }
-    parts.push(segment);
-  }
-  return parts.join("/");
 }
 
 function isMarkdownPath(filePath: string) {

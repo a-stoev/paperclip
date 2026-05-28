@@ -75,6 +75,7 @@ import {
   readCatalogStringList,
   readPortableCatalogProvenance,
 } from "./catalog-provenance.js";
+import { normalizePortablePath } from "./portable-path.js";
 
 /** Build OrgNode tree from manifest agent list (slug + reportsToSlug). */
 function buildOrgTreeFromManifest(agents: CompanyPortabilityManifest["agents"]): OrgNode[] {
@@ -1440,20 +1441,6 @@ function normalizeInclude(input?: Partial<CompanyPortabilityInclude>): CompanyPo
     issues: input?.issues ?? DEFAULT_INCLUDE.issues,
     skills: input?.skills ?? DEFAULT_INCLUDE.skills,
   };
-}
-
-function normalizePortablePath(input: string) {
-  const normalized = input.replace(/\\/g, "/").replace(/^\.\/+/, "");
-  const parts: string[] = [];
-  for (const segment of normalized.split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === "..") {
-      if (parts.length > 0) parts.pop();
-      continue;
-    }
-    parts.push(segment);
-  }
-  return parts.join("/");
 }
 
 function resolvePortablePath(fromPath: string, targetPath: string) {

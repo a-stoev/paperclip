@@ -39,6 +39,7 @@ import { conflict, notFound, unprocessable } from "../errors.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
+import { normalizePortablePath } from "./portable-path.js";
 import {
   copyCatalogSkillFile,
   getCatalogPackageMetadata,
@@ -270,19 +271,6 @@ function asString(value: unknown): string | null {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function normalizePortablePath(input: string) {
-  const parts: string[] = [];
-  for (const segment of input.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "").split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === "..") {
-      if (parts.length > 0) parts.pop();
-      continue;
-    }
-    parts.push(segment);
-  }
-  return parts.join("/");
 }
 
 function normalizePackageFileMap(files: Record<string, string>) {
@@ -2117,7 +2105,9 @@ export function companySkillService(db: Db) {
     await ensureSkillInventoryCurrent(companyId);
     const skill = await getById(companyId, skillId);
     if (!skill) return null;
-    if (skill.sourceType !== "catalog" && skill.sourceType !== "local_path") return null;
+    if (skill.sourceType !== "catalog" && skill.sourceType !== "local_path") {
+      throw unprocessable("Only local-path and catalog-managed company skills support audit.");
+    }
     const audit = await auditInstalledSkillBytes(skill);
     await persistAuditMetadata(skill, audit);
     return audit;

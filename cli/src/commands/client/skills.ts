@@ -587,8 +587,7 @@ async function getCatalogSkill(ctx: ResolvedClientContext, catalogRef: string): 
   if (!ref) {
     throw new Error("Catalog skill reference is required.");
   }
-  const params = new URLSearchParams({ ref });
-  const detail = await ctx.api.get<CatalogSkill>(`/api/skills/catalog/ref?${params.toString()}`);
+  const detail = await ctx.api.get<CatalogSkill>(`/api/skills/catalog/${encodeURIComponent(ref)}`);
   if (!detail) {
     throw new Error(`Catalog skill not found: ${catalogRef}`);
   }
