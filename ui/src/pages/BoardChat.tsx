@@ -545,6 +545,12 @@ export function BoardChat() {
     [handleSend],
   );
 
+  // NOTE: declared before the early return below — all hooks must run on
+  // every render (Rules of Hooks). Placing it after the `!selectedCompanyId`
+  // guard caused "Rendered more hooks than during the previous render" and a
+  // blank page once a company was selected.
+  const [mobileFeedOpen, setMobileFeedOpen] = useState(false);
+
   if (!selectedCompanyId) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -557,8 +563,6 @@ export function BoardChat() {
       </div>
     );
   }
-
-  const [mobileFeedOpen, setMobileFeedOpen] = useState(false);
 
   return (
     <div className="flex h-[calc(100%+3rem)] flex-col -m-6">
