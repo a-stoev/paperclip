@@ -85,6 +85,12 @@ export function teamsCatalogRoutes(db: Db) {
     res.json(getCatalogTeamOrThrow(catalogRef));
   });
 
+  router.get("/companies/:companyId/teams/catalog/installed", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await svc.listInstalledCatalogTeams(companyId));
+  });
+
   router.post(
     "/companies/:companyId/teams/catalog/:catalogId/preview",
     validate(catalogTeamPreviewSchema),

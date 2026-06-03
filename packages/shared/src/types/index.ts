@@ -98,6 +98,7 @@ export type {
   CatalogTeamSkillPreparation,
   CatalogTeamImportPreviewResult,
   CatalogTeamInstallResult,
+  InstalledCatalogTeam,
 } from "./teams-catalog.js";
 export type {
   AgentSkillSyncMode,

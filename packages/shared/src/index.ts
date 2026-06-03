@@ -341,6 +341,7 @@ export type {
   CatalogTeamSkillPreparation,
   CatalogTeamImportPreviewResult,
   CatalogTeamInstallResult,
+  InstalledCatalogTeam,
   AgentSkillSyncMode,
   AgentSkillState,
   AgentSkillOrigin,
