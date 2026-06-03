@@ -35,4 +35,26 @@ describe("company routes", () => {
     expect(applyCompanyPrefix("/search?q=hello%20world", "PAP")).toBe("/PAP/search?q=hello%20world");
     expect(toCompanyRelativePath("/PAP/search?q=foo")).toBe("/search?q=foo");
   });
+
+  // Regression for PAP-10257: Team Catalog navigation (auto-select + row/file
+  // clicks) produces company-relative `/teams/<key>` paths. Without `teams` in
+  // the board-route allowlist, `extractCompanyPrefixFromPath` misread the first
+  // segment as a company prefix ("TEAMS") and `useNavigate` skipped the rewrite,
+  // dropping the `/PAP/` prefix and crashing into "Company not found".
+  it("re-prefixes team catalog routes so navigate preserves the company prefix", () => {
+    expect(isBoardPathWithoutPrefix("/teams")).toBe(true);
+    expect(isBoardPathWithoutPrefix("/teams/core-exec-team")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/teams/core-exec-team")).toBeNull();
+
+    // Auto-select effect: `/teams/<first-key>` must gain the `/PAP/` prefix.
+    expect(applyCompanyPrefix("/teams/core-exec-team", "PAP")).toBe("/PAP/teams/core-exec-team");
+    // File-tree click: nested `/files/<encoded>` path is preserved under the prefix.
+    expect(applyCompanyPrefix("/teams/core-exec-team/files/TEAM.md", "PAP")).toBe(
+      "/PAP/teams/core-exec-team/files/TEAM.md",
+    );
+    // Already-prefixed paths are left untouched (idempotent — no double prefix).
+    expect(applyCompanyPrefix("/PAP/teams/core-exec-team", "PAP")).toBe("/PAP/teams/core-exec-team");
+    // Round-trips back to a company-relative path.
+    expect(toCompanyRelativePath("/PAP/teams/core-exec-team")).toBe("/teams/core-exec-team");
+  });
 });

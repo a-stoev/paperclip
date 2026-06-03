@@ -2129,7 +2129,7 @@ export function TeamCatalog() {
   const selectedRef = parsedRoute.catalogRef;
   const selectedFilePath = parsedRoute.filePath;
 
-  const q = searchParams.get("q") ?? "";
+  const q = searchParams.get("search") ?? "";
   const kindFilter = (searchParams.get("kind") as KindFilter) ?? "all";
   const categoryFilter = searchParams.get("category") ?? "";
   const riskFilter = (searchParams.get("risk") as RiskFilter) ?? "any";
@@ -2229,7 +2229,7 @@ export function TeamCatalog() {
           <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={q}
-            onChange={(e) => setFilterParam("q", e.target.value)}
+            onChange={(e) => setFilterParam("search", e.target.value)}
             placeholder="Search teams"
             className="h-8 w-56 pl-8"
           />
