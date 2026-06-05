@@ -10,7 +10,7 @@ import type {
   CatalogTeamKind,
   CatalogTeamSkillRequirement,
   CatalogTeamSkillRequirementType,
-} from "@paperclipai/teams-catalog";
+} from "@paperclipai/shared";
 import type {
   CompanyPortabilityAdapterOverride,
   CompanyPortabilityAgentSelection,
