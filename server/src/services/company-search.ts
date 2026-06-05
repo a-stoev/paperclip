@@ -6,6 +6,7 @@ import {
   COMPANY_SEARCH_MAX_LIMIT,
   COMPANY_SEARCH_MAX_OFFSET,
   COMPANY_SEARCH_MAX_TOKENS,
+  COMPANY_ARTIFACTS_MAX_LIMIT,
   COMPANY_ARTIFACTS_MAX_QUERY_LENGTH,
   type CompanyArtifact,
   type CompanySearchArtifactSummary,
@@ -697,7 +698,7 @@ export function companySearchService(db: Db) {
       const artifactRows = scopeIncludesArtifacts(scope)
         ? await companyArtifactsService(db).list(companyId, {
           q: normalizedQuery.slice(0, COMPANY_ARTIFACTS_MAX_QUERY_LENGTH),
-          limit: fetchLimit,
+          limit: Math.min(fetchLimit, COMPANY_ARTIFACTS_MAX_LIMIT),
         }).then((result) => result.artifacts)
         : [];
 

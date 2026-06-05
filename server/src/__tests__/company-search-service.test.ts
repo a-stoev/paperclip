@@ -241,6 +241,20 @@ describeEmbeddedPostgres("companySearchService", () => {
     expect(result.countsByType).toEqual({ issue: 0, artifact: 1, agent: 0, project: 0 });
   });
 
+  it("does not pass high-offset search fetch windows through to artifact query validation", async () => {
+    const companyId = await createCompany();
+
+    const result = await svc.search(companyId, companySearchQuerySchema.parse({
+      q: "artifact",
+      scope: "artifacts",
+      limit: "50",
+      offset: "75",
+    }));
+
+    expect(result.results).toEqual([]);
+    expect(result.countsByType.artifact).toBe(0);
+  });
+
   it("excludes hidden issues and other companies' data", async () => {
     const companyId = await createCompany("Visible Co");
     const otherCompanyId = await createCompany("Other Co");
