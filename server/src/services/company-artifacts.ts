@@ -283,6 +283,20 @@ export function companyArtifactsService(db: Db, storage?: StorageService) {
           .orderBy(desc(issueWorkProducts.updatedAt), desc(workProductArtifactId))
           .limit(fetchLimit);
 
+        const workProductAttachmentRows = await db
+          .select({
+            attachmentId: sql<string | null>`${issueWorkProducts.metadata}->>'attachmentId'`,
+          })
+          .from(issueWorkProducts)
+          .innerJoin(issues, eq(issueWorkProducts.issueId, issues.id))
+          .where(and(...workProductConditions, sql`${issueWorkProducts.metadata}->>'attachmentId' IS NOT NULL`));
+
+        for (const row of workProductAttachmentRows) {
+          if (row.attachmentId) {
+            workProductAttachmentIds.add(row.attachmentId);
+          }
+        }
+
         for (const row of workProductRows) {
           const metadata = attachmentArtifactWorkProductMetadataSchema.safeParse(row.metadata);
           const attachmentMetadata = metadata.success ? metadata.data : null;

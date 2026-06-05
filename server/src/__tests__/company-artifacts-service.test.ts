@@ -387,6 +387,77 @@ describeEmbeddedPostgres("companyArtifactsService", () => {
     expect(secondPage.artifacts.map((artifact) => artifact.title)).toEqual(["Primary Cut", "notes.txt"]);
   });
 
+  it("deduplicates work product attachments beyond the work product fetch window", async () => {
+    const { companyId, projectId, issueId } = await seedArtifacts();
+    const dedupedAttachmentId = "abababab-abab-4bab-8bab-abababababab";
+
+    await db.insert(assets).values({
+      id: "acacacac-acac-4cac-8cac-acacacacacac",
+      companyId,
+      provider: "local_disk",
+      objectKey: "late-render.mp4",
+      contentType: "video/mp4",
+      byteSize: 500,
+      sha256: "sha256-late-render",
+      originalFilename: "late-render.mp4",
+      createdByAgentId: "33333333-3333-4333-8333-333333333333",
+    });
+    await db.insert(issueAttachments).values({
+      id: dedupedAttachmentId,
+      companyId,
+      issueId,
+      assetId: "acacacac-acac-4cac-8cac-acacacacacac",
+      updatedAt: new Date("2026-01-20T00:00:00.000Z"),
+    });
+
+    const fillerWorkProducts = Array.from({ length: 21 }, (_, index) => ({
+      id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+      companyId,
+      projectId,
+      issueId,
+      type: "artifact" as const,
+      provider: "paperclip",
+      title: `Filler Video ${index + 1}`,
+      status: "ready_for_review" as const,
+      summary: "Filler artifact to push the attachment-backed work product past the fetch window",
+      metadata: { contentType: "video/mp4" },
+      createdByRunId: "99999999-9999-4999-8999-999999999999",
+      updatedAt: new Date(`2026-01-10T00:${String(index).padStart(2, "0")}:00.000Z`),
+    }));
+    await db.insert(issueWorkProducts).values([
+      ...fillerWorkProducts,
+      {
+        id: "adadadad-adad-4dad-8dad-adadadadadad",
+        companyId,
+        projectId,
+        issueId,
+        type: "artifact",
+        provider: "paperclip",
+        title: "Late Render",
+        status: "ready_for_review",
+        summary: "Attachment-backed work product outside the limited fetch window",
+        metadata: {
+          attachmentId: dedupedAttachmentId,
+          contentType: "video/mp4",
+          byteSize: 500,
+          contentPath: `/api/attachments/${dedupedAttachmentId}/content`,
+          openPath: `/api/attachments/${dedupedAttachmentId}/content`,
+          downloadPath: `/api/attachments/${dedupedAttachmentId}/content?download=1`,
+          originalFilename: "late-render.mp4",
+        },
+        createdByRunId: "99999999-9999-4999-8999-999999999999",
+        updatedAt: new Date("2026-01-01T12:00:00.000Z"),
+      },
+    ]);
+
+    const result = await companyArtifactsService(db, createStorageService()).list(companyId, {
+      kind: "video",
+      limit: 20,
+    });
+
+    expect(result.artifacts.some((artifact) => artifact.title === "late-render.mp4")).toBe(false);
+  });
+
   it("does not project a foreign agent from a malformed work product run reference", async () => {
     const { companyId, issueId, otherRunId } = await seedArtifacts();
 
