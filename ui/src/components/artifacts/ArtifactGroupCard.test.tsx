@@ -14,7 +14,7 @@ vi.mock("@/context/CompanyContext", () => ({
 function sampleArtifact(overrides: Partial<CompanyArtifact> = {}): CompanyArtifact {
   return {
     id: "artifact-1",
-    source: "image",
+    source: "attachment",
     mediaKind: "image",
     title: "Hero shot",
     previewText: null,

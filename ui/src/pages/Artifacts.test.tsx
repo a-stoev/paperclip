@@ -360,6 +360,7 @@ describe("Artifacts page", () => {
       expect(card).not.toBeNull();
       expect(card.getAttribute("data-count")).toBe("4");
       expect(card.getAttribute("data-stacked")).toBe("true");
+      expect(card.getAttribute("href")).toBe("/artifacts?groupIssueId=issue-1");
       expect(card.textContent).toContain("4 artifacts");
     });
 
@@ -389,6 +390,9 @@ describe("Artifacts page", () => {
         cursor: undefined,
       });
       expect(container.querySelector('[data-testid="artifact-stack-back"]')).not.toBeNull();
+      expect(
+        (container.querySelector('[data-testid="artifact-stack-back"]') as HTMLAnchorElement).getAttribute("href"),
+      ).toBe("/artifacts");
       expect(container.textContent).toContain("Stacked Artifact");
       expect(container.querySelector('[data-testid="artifact-card"]')).not.toBeNull();
     });

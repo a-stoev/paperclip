@@ -152,15 +152,20 @@ export function Artifacts() {
   const stackTo = useCallback(
     (issueId: string): To =>
       buildTo((next) => {
-        if (groupBy !== "none") next.set("groupBy", groupBy);
+        if (groupBy === "task") next.delete("groupBy");
+        else if (groupBy !== "none") next.set("groupBy", groupBy);
         next.set("groupIssueId", issueId);
       }),
     [buildTo, groupBy],
   );
 
   const backToStacksTo = useMemo<To>(
-    () => buildTo((next) => next.delete("groupIssueId")),
-    [buildTo],
+    () =>
+      buildTo((next) => {
+        if (groupBy === "task") next.delete("groupBy");
+        next.delete("groupIssueId");
+      }),
+    [buildTo, groupBy],
   );
 
   const {
