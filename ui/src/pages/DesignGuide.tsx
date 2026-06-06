@@ -114,6 +114,7 @@ import {
 } from "@/components/ui/avatar";
 import { StatusBadge, AgentStatusBadge, AgentStatusCapsule } from "@/components/StatusBadge";
 import { StatusIcon } from "@/components/StatusIcon";
+import { EnforcementBanner } from "@/components/EnforcementBanner";
 import { PriorityIcon } from "@/components/PriorityIcon";
 import { EntityRow } from "@/components/EntityRow";
 import { EmptyState } from "@/components/EmptyState";
@@ -1616,6 +1617,48 @@ export function DesignGuide() {
             When a task has produced no artifact work products, the Output section renders nothing
             at all (no placeholder card).
           </p>
+        </SubSection>
+      </Section>
+
+      {/* ============================================================ */}
+      {/*  TOOLS & ACCESS (PAP-10389)                                   */}
+      {/* ============================================================ */}
+      <Section title="Tools & Access">
+        <SubSection title="EnforcementBanner — default / denied-detected">
+          <div className="space-y-3">
+            <EnforcementBanner companyId="" forceVariant="default" recentDenialCount={0} />
+            <EnforcementBanner companyId="" forceVariant="denied-detected" recentDenialCount={3} />
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Persistent at the top of the Tools &amp; Access surface. Tints to <code>denied-detected</code> when
+            governed tool calls were denied or failed in the last hour. Observability only — enforcement lives
+            in the tool gateway.
+          </p>
+        </SubSection>
+
+        <SubSection title="Tool-access status keys (StatusBadge)">
+          <div className="flex flex-wrap items-center gap-2">
+            {[
+              "allowed", "denied", "block", "require-approval", "redacted", "rate-limit",
+              "deferred", "hidden", "quarantined", "healthy", "degraded", "runtime-error", "unchecked",
+            ].map((s) => (
+              <StatusBadge key={s} status={s} />
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Policy decisions, connection/runtime health, and catalog quarantine all route through the canonical{" "}
+            <code>StatusBadge</code> keys defined in <code>lib/status-colors</code>.
+          </p>
+        </SubSection>
+
+        <SubSection title="EmptyState (canonical, with description + action)">
+          <EmptyState
+            icon={Inbox}
+            message="No connections yet"
+            description="Add a connection to an application to configure credentials and discover its tools."
+            action="New connection"
+            onAction={() => {}}
+          />
         </SubSection>
       </Section>
     </div>

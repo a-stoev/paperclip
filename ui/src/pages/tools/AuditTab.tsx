@@ -14,7 +14,8 @@ import {
 } from "@/components/ui/select";
 import { queryKeys } from "@/lib/queryKeys";
 import { toolsApi, type ToolGatewayAuditRow } from "@/api/tools";
-import { ToolsPageHeader, LoadingState, ErrorState, EmptyState, RelativeTime } from "./shared";
+import { EmptyState } from "@/components/EmptyState";
+import { ToolsPageHeader, LoadingState, ErrorState, RelativeTime } from "./shared";
 
 const OUTCOME_FILTERS = [
   { value: "__all", label: "All outcomes" },
@@ -136,8 +137,8 @@ export function AuditTab({ companyId }: { companyId: string }) {
         <ErrorState error={audit.error} onRetry={() => audit.refetch()} />
       ) : filtered.length === 0 ? (
         <EmptyState
-          icon={<ScrollText className="h-6 w-6" />}
-          title="No matching audit events"
+          icon={ScrollText}
+          message="No matching audit events"
           description="Governed tool calls appear here as soon as agents start using the gateway."
         />
       ) : (

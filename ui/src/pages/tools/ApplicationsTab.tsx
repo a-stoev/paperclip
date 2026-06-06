@@ -26,7 +26,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/context/ToastContext";
-import { ToolsPageHeader, LoadingState, ErrorState, EmptyState, RelativeTime } from "./shared";
+import { EmptyState } from "@/components/EmptyState";
+import { ToolsPageHeader, LoadingState, ErrorState, RelativeTime } from "./shared";
 
 const APP_TYPES: { value: ToolApplicationType; label: string }[] = [
   { value: "mcp_http", label: "MCP server (remote HTTP)" },
@@ -92,15 +93,11 @@ export function ApplicationsTab({ companyId }: { companyId: string }) {
 
       {list.length === 0 ? (
         <EmptyState
-          icon={<AppWindow className="h-6 w-6" />}
-          title="No applications yet"
+          icon={AppWindow}
+          message="No applications yet"
           description="Register an MCP server or plugin tool bundle to start governing tool access."
-          action={
-            <Button size="sm" onClick={() => setOpen(true)}>
-              <Plus className="mr-1 h-4 w-4" />
-              New application
-            </Button>
-          }
+          action="New application"
+          onAction={() => setOpen(true)}
         />
       ) : (
         <div className="grid gap-3">

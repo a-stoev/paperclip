@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   AppWindow,
@@ -14,6 +15,9 @@ import { Link, useParams } from "@/lib/router";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { cn } from "@/lib/utils";
+import { queryKeys } from "@/lib/queryKeys";
+import { toolsApi } from "@/api/tools";
+import { EnforcementBanner } from "@/components/EnforcementBanner";
 import { OverviewTab } from "./OverviewTab";
 import { ApplicationsTab } from "./ApplicationsTab";
 import { ConnectionsTab } from "./ConnectionsTab";
@@ -43,7 +47,7 @@ function renderTab(tab: TabKey, companyId: string) {
     case "connections":
       return <ConnectionsTab companyId={companyId} />;
     case "profiles":
-      return <ProfilesTab />;
+      return <ProfilesTab companyId={companyId} />;
     case "policies":
       return <PoliciesTab companyId={companyId} />;
     case "runtime":
@@ -51,7 +55,7 @@ function renderTab(tab: TabKey, companyId: string) {
     case "audit":
       return <AuditTab companyId={companyId} />;
     case "examples":
-      return <ExamplesTab />;
+      return <ExamplesTab companyId={companyId} />;
     case "overview":
     default:
       return <OverviewTab companyId={companyId} />;
@@ -63,6 +67,15 @@ export function ToolsAccess() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const params = useParams<{ tab?: string }>();
   const activeTab = (TABS.find((t) => t.key === params.tab)?.key ?? "overview") as TabKey;
+
+  // Drives the live cyan dot on the Runtime tab when any slot is running.
+  const runtimeSlots = useQuery({
+    queryKey: queryKeys.tools.runtimeSlots(selectedCompanyId ?? "__none__"),
+    queryFn: () => toolsApi.listRuntimeSlots(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+    refetchInterval: 15_000,
+  });
+  const runtimeActive = (runtimeSlots.data?.runtimeSlots ?? []).some((s) => s.status === "running");
 
   useEffect(() => {
     setBreadcrumbs([
@@ -83,21 +96,19 @@ export function ToolsAccess() {
         <ClipboardList className="h-5 w-5 text-muted-foreground" />
         <h1 className="text-xl font-bold text-foreground">Tools &amp; Access</h1>
       </div>
-      <p className="-mt-2 max-w-3xl text-sm text-muted-foreground">
-        Govern which agents can use which external tools and MCP servers. Access is enforced server-side by the
-        tool gateway — these screens configure and observe that enforcement, they do not replace it.
-      </p>
+      <EnforcementBanner companyId={selectedCompanyId} />
 
-      <nav className="flex flex-wrap gap-1 border-b border-border">
+      <nav className="-mx-1 flex gap-1 overflow-x-auto whitespace-nowrap border-b border-border px-1">
         {TABS.map((tab) => {
           const Icon = tab.icon;
           const isActive = tab.key === activeTab;
+          const showLiveDot = tab.key === "runtime" && runtimeActive;
           return (
             <Link
               key={tab.key}
               to={`/company/settings/tools/${tab.key}`}
               className={cn(
-                "flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+                "flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors",
                 isActive
                   ? "border-primary text-foreground"
                   : "border-transparent text-muted-foreground hover:text-foreground",
@@ -105,6 +116,12 @@ export function ToolsAccess() {
             >
               <Icon className="h-4 w-4" />
               {tab.label}
+              {showLiveDot ? (
+                <span
+                  className="ml-0.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-500"
+                  aria-label="runtime active"
+                />
+              ) : null}
             </Link>
           );
         })}

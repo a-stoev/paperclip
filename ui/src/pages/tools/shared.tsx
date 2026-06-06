@@ -4,9 +4,10 @@ import type {
   ToolConnectionHealthStatus,
   ToolPolicyDecision,
 } from "@paperclipai/shared";
-import { AlertTriangle, Loader2, Wrench } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { StatusBadge } from "@/components/StatusBadge";
 import { ApiError } from "@/api/client";
 
 /** Risk classification badge for a catalog tool. */
@@ -40,17 +41,33 @@ export function CapabilityBadges({
   );
 }
 
-const HEALTH_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-  healthy: "default",
-  ok: "default",
-  degraded: "secondary",
-  unchecked: "outline",
-  unknown: "outline",
-  error: "destructive",
-  unhealthy: "destructive",
-};
+/** Catalog quarantine marker — canonical status key. */
+export function QuarantineBadge() {
+  return <StatusBadge status="quarantined" />;
+}
 
-/** Connection / runtime health badge with a colored status dot. */
+function healthToStatusKey(status: string): string {
+  switch (status) {
+    case "healthy":
+    case "ok":
+    case "":
+      return "healthy";
+    case "degraded":
+    case "warning":
+      return "degraded";
+    case "error":
+    case "unhealthy":
+    case "critical":
+      return "runtime-error";
+    case "unchecked":
+    case "unknown":
+      return "unchecked";
+    default:
+      return status;
+  }
+}
+
+/** Connection / runtime health badge, mapped onto canonical status colors. */
 export function HealthBadge({
   status,
   label,
@@ -58,42 +75,43 @@ export function HealthBadge({
   status: ToolConnectionHealthStatus | string | null | undefined;
   label?: string;
 }) {
-  const key = (status ?? "unknown").toString();
-  const variant = HEALTH_VARIANT[key] ?? "outline";
-  const dot =
-    variant === "default"
-      ? "bg-emerald-500"
-      : variant === "destructive"
-        ? "bg-destructive"
-        : variant === "secondary"
-          ? "bg-amber-500"
-          : "bg-muted-foreground";
-  return (
-    <Badge variant={variant} className="gap-1.5">
-      <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} />
-      {label ?? key}
-    </Badge>
-  );
+  const raw = (status ?? "unknown").toString();
+  return <StatusBadge status={healthToStatusKey(raw)} label={label ?? raw} />;
 }
 
-const DECISION_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-  allow: "default",
-  allowed: "default",
-  require_approval: "secondary",
-  requires_approval: "secondary",
-  redact: "secondary",
-  rate_limited: "secondary",
-  defer: "secondary",
-  block: "destructive",
-  deny: "destructive",
-  hidden: "outline",
-};
+function decisionToStatusKey(decision: string): { key: string; label: string } {
+  switch (decision) {
+    case "allow":
+    case "allowed":
+      return { key: "allowed", label: "allowed" };
+    case "deny":
+    case "denied":
+      return { key: "denied", label: "denied" };
+    case "block":
+      return { key: "block", label: "block" };
+    case "require_approval":
+    case "requires_approval":
+      return { key: "require-approval", label: "require approval" };
+    case "redact":
+    case "redacted":
+      return { key: "redacted", label: "redacted" };
+    case "rate_limited":
+      return { key: "rate-limit", label: "rate limited" };
+    case "defer":
+    case "deferred":
+      return { key: "deferred", label: "deferred" };
+    case "hidden":
+      return { key: "hidden", label: "hidden" };
+    default:
+      return { key: decision, label: decision };
+  }
+}
 
-/** Policy/gateway decision badge. */
+/** Policy/gateway decision badge — canonical status colors. */
 export function DecisionBadge({ decision }: { decision: ToolPolicyDecision | string | null | undefined }) {
   if (!decision) return <Badge variant="outline">—</Badge>;
-  const variant = DECISION_VARIANT[decision.toString()] ?? "outline";
-  return <Badge variant={variant}>{decision}</Badge>;
+  const { key, label } = decisionToStatusKey(decision.toString());
+  return <StatusBadge status={key} label={label} />;
 }
 
 /** Compact relative time, falling back to absolute. */
@@ -139,7 +157,7 @@ export function ToolsPageHeader({
 export function LoadingState({ label = "Loading…" }: { label?: string }) {
   return (
     <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
-      <Loader2 className="h-4 w-4 animate-spin" />
+      <span className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground" />
       {label}
     </div>
   );
@@ -147,14 +165,21 @@ export function LoadingState({ label = "Loading…" }: { label?: string }) {
 
 /** Actionable error surface — surfaces the server message and HTTP status. */
 export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () => void }) {
-  const message =
-    error instanceof ApiError
-      ? error.status === 403
-        ? "You do not have permission to view this. Tools & Access requires board/admin access."
-        : error.message
-      : error instanceof Error
-        ? error.message
-        : "Something went wrong.";
+  let message: string;
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      message = "You do not have permission to view this. Tools & Access requires board/admin access.";
+    } else if (error.status === 404 || /route not found/i.test(error.message)) {
+      // Snapshot-skew window: the route exists in this build but not on the live server snapshot yet.
+      message = "Tools & Access isn't available on this server yet — try refreshing after the next deployment.";
+    } else {
+      message = error.message;
+    }
+  } else if (error instanceof Error) {
+    message = error.message;
+  } else {
+    message = "Something went wrong.";
+  }
   return (
     <Card className="border-destructive/40">
       <CardContent className="flex flex-col gap-3 py-6">
@@ -174,24 +199,6 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
             Retry
           </button>
         ) : null}
-      </CardContent>
-    </Card>
-  );
-}
-
-export function EmptyState({ icon, title, description, action }: {
-  icon?: ReactNode;
-  title: string;
-  description?: ReactNode;
-  action?: ReactNode;
-}) {
-  return (
-    <Card>
-      <CardContent className="flex flex-col items-center justify-center gap-2 py-12 text-center">
-        <div className="text-muted-foreground">{icon ?? <Wrench className="h-6 w-6" />}</div>
-        <p className="text-sm font-medium text-foreground">{title}</p>
-        {description ? <p className="max-w-md text-sm text-muted-foreground">{description}</p> : null}
-        {action ? <div className="pt-1">{action}</div> : null}
       </CardContent>
     </Card>
   );
