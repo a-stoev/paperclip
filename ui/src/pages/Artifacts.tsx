@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 
 const ARTIFACTS_PAGE_SIZE = 30;
 const SEARCH_DEBOUNCE_MS = 250;
@@ -46,7 +47,8 @@ const GROUP_OPTIONS: { value: ArtifactGroupBy; label: string }[] = [
 const KIND_VALUES = new Set(KIND_FILTERS.map((filter) => filter.value));
 
 function parseGroupBy(value: string | null): ArtifactGroupBy {
-  return value === "task" || value === "parent_task" ? value : "none";
+  if (value === "none" || value === "task" || value === "parent_task") return value;
+  return "task";
 }
 
 function parseKind(value: string | null): ArtifactKindFilter {
@@ -127,7 +129,7 @@ export function Artifacts() {
       updateParams((next) => {
         // Switching the grouping mode always returns to the stack list.
         next.delete("groupIssueId");
-        if (value === "none") next.delete("groupBy");
+        if (value === "task") next.delete("groupBy");
         else next.set("groupBy", value);
       });
     },
@@ -263,6 +265,38 @@ export function Artifacts() {
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label={`Group artifacts (currently ${groupByLabel(groupBy)})`}
+                title="Group artifacts"
+                data-testid="artifact-group-control"
+                data-group-by={groupBy}
+                className={cn("h-8 w-8 shrink-0", grouping && "bg-accent")}
+              >
+                <Layers className="h-3.5 w-3.5" aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuLabel>Group by</DropdownMenuLabel>
+              {GROUP_OPTIONS.map((option) => (
+                <DropdownMenuItem
+                  key={option.value}
+                  data-testid={`artifact-group-option-${option.value}`}
+                  aria-selected={groupBy === option.value}
+                  onSelect={() => selectGroupBy(option.value)}
+                  className="justify-between"
+                >
+                  {option.label}
+                  {groupBy === option.value ? <Check className="h-3.5 w-3.5" /> : null}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
           <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Filter artifacts by type">
             {KIND_FILTERS.map((filter) => (
               <button
@@ -282,41 +316,6 @@ export function Artifacts() {
               </button>
             ))}
           </div>
-
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label={`Group artifacts (currently ${groupByLabel(groupBy)})`}
-                data-testid="artifact-group-control"
-                data-group-by={groupBy}
-                className={cn(
-                  "inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors",
-                  grouping
-                    ? "bg-accent text-foreground"
-                    : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-                )}
-              >
-                <Layers className="h-4 w-4" aria-hidden="true" />
-                <span className="hidden sm:inline">{grouping ? groupByLabel(groupBy) : "Group"}</span>
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-44">
-              <DropdownMenuLabel>Group by</DropdownMenuLabel>
-              {GROUP_OPTIONS.map((option) => (
-                <DropdownMenuItem
-                  key={option.value}
-                  data-testid={`artifact-group-option-${option.value}`}
-                  aria-selected={groupBy === option.value}
-                  onSelect={() => selectGroupBy(option.value)}
-                  className="justify-between"
-                >
-                  {option.label}
-                  {groupBy === option.value ? <Check className="h-3.5 w-3.5" /> : null}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
         </div>
       </div>
 

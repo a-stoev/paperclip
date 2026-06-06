@@ -171,8 +171,8 @@ describe("Artifacts page", () => {
     container.remove();
   });
 
-  it("requests the flat artifact list with grouping defaults", async () => {
-    artifactsApiMock.list.mockResolvedValue({ artifacts: [sampleArtifact()], nextCursor: null });
+  it("requests task-grouped artifact stacks by default", async () => {
+    artifactsApiMock.list.mockResolvedValue({ artifacts: [], groups: [sampleGroup()], nextCursor: null });
 
     const { root } = renderArtifacts(container);
 
@@ -180,11 +180,20 @@ describe("Artifacts page", () => {
       expect(artifactsApiMock.list).toHaveBeenCalledWith("company-1", {
         kind: "all",
         q: undefined,
-        groupBy: "none",
+        groupBy: "task",
         groupIssueId: undefined,
         limit: 30,
         cursor: undefined,
       });
+      const groupControl = container.querySelector('[data-testid="artifact-group-control"]') as HTMLButtonElement;
+      const allFilter = [...container.querySelectorAll('[role="tab"]')]
+        .find((element) => element.textContent === "All") as HTMLButtonElement;
+      expect(groupControl).not.toBeNull();
+      expect(groupControl.textContent).toBe("");
+      expect(groupControl.getAttribute("data-variant")).toBe("outline");
+      expect(groupControl.getAttribute("data-size")).toBe("icon");
+      expect(groupControl.getAttribute("data-group-by")).toBe("task");
+      expect(Boolean(groupControl.compareDocumentPosition(allFilter) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
     });
 
     flushSync(() => {
@@ -194,8 +203,8 @@ describe("Artifacts page", () => {
 
   it("debounces artifact search into the artifacts API", async () => {
     artifactsApiMock.list
-      .mockResolvedValueOnce({ artifacts: [sampleArtifact()], nextCursor: null })
-      .mockResolvedValueOnce({ artifacts: [], nextCursor: null });
+      .mockResolvedValueOnce({ artifacts: [], groups: [sampleGroup()], nextCursor: null })
+      .mockResolvedValueOnce({ artifacts: [], groups: [], nextCursor: null });
 
     const { root } = renderArtifacts(container);
 
@@ -217,7 +226,7 @@ describe("Artifacts page", () => {
       expect(artifactsApiMock.list).toHaveBeenLastCalledWith("company-1", {
         kind: "all",
         q: "launch",
-        groupBy: "none",
+        groupBy: "task",
         groupIssueId: undefined,
         limit: 30,
         cursor: undefined,
@@ -232,7 +241,7 @@ describe("Artifacts page", () => {
   it("keeps the artifacts grid max-width constrained and left aligned", async () => {
     artifactsApiMock.list.mockResolvedValue({ artifacts: [sampleArtifact()], nextCursor: null });
 
-    const { root } = renderArtifacts(container);
+    const { root } = renderArtifacts(container, ["/artifacts?groupBy=none"]);
 
     await waitForAssertion(() => {
       expect(container.querySelector('[data-testid="artifact-card"]')).not.toBeNull();
@@ -258,7 +267,7 @@ describe("Artifacts page", () => {
         nextCursor: null,
       });
 
-    const { root } = renderArtifacts(container);
+    const { root } = renderArtifacts(container, ["/artifacts?groupBy=none"]);
 
     await waitForAssertion(() => {
       expect(container.textContent).toContain("First Artifact");
@@ -289,38 +298,39 @@ describe("Artifacts page", () => {
 
   it("switches grouping via the group control and refetches stacks", async () => {
     artifactsApiMock.list.mockImplementation((_companyId: string, params?: { groupBy?: string }) => {
-      if (params?.groupBy === "task") {
-        return Promise.resolve({ artifacts: [], groups: [sampleGroup()], nextCursor: null });
+      if (params?.groupBy === "none") {
+        return Promise.resolve({ artifacts: [sampleArtifact()], nextCursor: null });
       }
-      return Promise.resolve({ artifacts: [sampleArtifact()], nextCursor: null });
+      return Promise.resolve({ artifacts: [], groups: [sampleGroup()], nextCursor: null });
     });
 
     const { root } = renderArtifacts(container);
 
     await waitForAssertion(() => {
-      expect(container.querySelector('[data-testid="artifact-card"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="artifact-group-card"]')).not.toBeNull();
     });
 
-    const taskOption = container.querySelector(
-      '[data-testid="artifact-group-option-task"]',
+    const noneOption = container.querySelector(
+      '[data-testid="artifact-group-option-none"]',
     ) as HTMLButtonElement;
-    expect(taskOption).not.toBeNull();
+    expect(noneOption).not.toBeNull();
 
     flushSync(() => {
-      taskOption.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      noneOption.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
     await waitForAssertion(() => {
       expect(artifactsApiMock.list).toHaveBeenLastCalledWith("company-1", {
         kind: "all",
         q: undefined,
-        groupBy: "task",
+        groupBy: "none",
         groupIssueId: undefined,
         limit: 30,
         cursor: undefined,
       });
-      expect(container.querySelector('[data-testid="artifact-group-card"]')).not.toBeNull();
-      expect(container.textContent).toContain("3 artifacts");
+      expect(container.querySelector('[data-testid="artifact-card"]')).not.toBeNull();
+      const groupControl = container.querySelector('[data-testid="artifact-group-control"]') as HTMLElement;
+      expect(groupControl.getAttribute("data-group-by")).toBe("none");
     });
 
     flushSync(() => {
