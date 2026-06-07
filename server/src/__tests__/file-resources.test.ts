@@ -569,6 +569,164 @@ describeEmbeddedPostgres("workspace file resources", () => {
     expect(JSON.stringify(rows.map((row) => row.details))).not.toContain(projectRoot);
   });
 
+  it("logs successful resolves and resolve/content limiter denials", async () => {
+    const { projectRoot, executionRoot } = await makeWorkspace();
+    const graph = await seedGraph(db, { projectRoot, executionRoot });
+    await fs.writeFile(path.join(projectRoot, "README.md"), "# Visible\n", "utf8");
+
+    const app = createApp(
+      db,
+      {
+        type: "board",
+        userId: "board-user",
+        companyIds: [graph.companyId],
+        source: "session",
+        isInstanceAdmin: false,
+      },
+      {
+        limiter: createFileResourceLimiter({ maxConcurrent: 1, maxRequests: 100, windowMs: 60_000 }),
+      },
+    );
+
+    const resolved = await request(app)
+      .get(`/api/issues/${graph.issueId}/file-resources/resolve`)
+      .query({ workspace: "project", path: "README.md" });
+    expect(resolved.status).toBe(200);
+
+    const rowsAfterResolve = await db.select().from(activityLog).where(eq(activityLog.entityId, graph.issueId));
+    const resolveRead = rowsAfterResolve.find((row) => row.action === "issue.file_resource_resolve");
+    expect(resolveRead?.details).toMatchObject({
+      outcome: "success",
+      workspaceKind: "project_workspace",
+      displayPath: "README.md",
+    });
+    expect(JSON.stringify(resolveRead?.details)).not.toContain(projectRoot);
+
+    let releaseSlowResolve: (() => void) | null = null;
+    let slowResolveStarted: (() => void) | null = null;
+    const slowResolve = new Promise<void>((resolve) => {
+      releaseSlowResolve = resolve;
+    });
+    const resolveStarted = new Promise<void>((resolve) => {
+      slowResolveStarted = resolve;
+    });
+    const resolveLimitedService: WorkspaceFileResourceService = {
+      getIssue: vi.fn(async () => ({ companyId: graph.companyId })),
+      list: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      resolve: vi.fn(async () => {
+        slowResolveStarted?.();
+        await slowResolve;
+        return {
+          kind: "file",
+          provider: "local_fs",
+          title: "README.md",
+          displayPath: "README.md",
+          workspaceLabel: "Workspace",
+          workspaceKind: "project_workspace",
+          workspaceId: "11111111-1111-4111-8111-111111111111",
+          previewKind: "text",
+          capabilities: { preview: true, download: false, listChildren: false },
+        };
+      }),
+      readContent: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+    };
+    const resolveLimitedApp = createApp(
+      db,
+      {
+        type: "board",
+        userId: "board-user",
+        companyIds: [graph.companyId],
+        source: "session",
+        isInstanceAdmin: false,
+      },
+      {
+        service: resolveLimitedService,
+        limiter: createFileResourceLimiter({ maxConcurrent: 1, maxRequests: 100, windowMs: 60_000 }),
+      },
+    );
+    const firstResolve = request(resolveLimitedApp)
+      .get(`/api/issues/${graph.issueId}/file-resources/resolve`)
+      .query({ path: "README.md" });
+    const firstResolveResponse = firstResolve.then((res) => res);
+    await resolveStarted;
+    const secondResolve = await request(resolveLimitedApp)
+      .get(`/api/issues/${graph.issueId}/file-resources/resolve`)
+      .query({ path: "README.md" });
+    expect(secondResolve.status).toBe(429);
+    releaseSlowResolve?.();
+    expect((await firstResolveResponse).status).toBe(200);
+
+    let releaseSlowContent: (() => void) | null = null;
+    let slowContentStarted: (() => void) | null = null;
+    const slowContent = new Promise<void>((resolve) => {
+      releaseSlowContent = resolve;
+    });
+    const contentStarted = new Promise<void>((resolve) => {
+      slowContentStarted = resolve;
+    });
+    const contentLimitedService: WorkspaceFileResourceService = {
+      getIssue: vi.fn(async () => ({ companyId: graph.companyId })),
+      list: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      resolve: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      readContent: vi.fn(async () => {
+        slowContentStarted?.();
+        await slowContent;
+        return {
+          resource: {
+            kind: "file",
+            provider: "local_fs",
+            title: "README.md",
+            displayPath: "README.md",
+            workspaceLabel: "Workspace",
+            workspaceKind: "project_workspace",
+            workspaceId: "11111111-1111-4111-8111-111111111111",
+            previewKind: "text",
+            capabilities: { preview: true, download: false, listChildren: false },
+          },
+          content: { encoding: "utf8", data: "# Visible\n" },
+        };
+      }),
+    };
+    const contentLimitedApp = createApp(
+      db,
+      {
+        type: "board",
+        userId: "board-user",
+        companyIds: [graph.companyId],
+        source: "session",
+        isInstanceAdmin: false,
+      },
+      {
+        service: contentLimitedService,
+        limiter: createFileResourceLimiter({ maxConcurrent: 1, maxRequests: 100, windowMs: 60_000 }),
+      },
+    );
+    const firstContent = request(contentLimitedApp)
+      .get(`/api/issues/${graph.issueId}/file-resources/content`)
+      .query({ path: "README.md" });
+    const firstContentResponse = firstContent.then((res) => res);
+    await contentStarted;
+    const secondContent = await request(contentLimitedApp)
+      .get(`/api/issues/${graph.issueId}/file-resources/content`)
+      .query({ path: "README.md" });
+    expect(secondContent.status).toBe(429);
+    releaseSlowContent?.();
+    expect((await firstContentResponse).status).toBe(200);
+
+    const rowsAfterLimits = await db.select().from(activityLog).where(eq(activityLog.entityId, graph.issueId));
+    expect(rowsAfterLimits.some((row) => row.action === "issue.file_resource_resolve_denied")).toBe(true);
+    expect(rowsAfterLimits.some((row) => row.action === "issue.file_resource_content_denied")).toBe(true);
+    expect(JSON.stringify(rowsAfterLimits.map((row) => row.details))).not.toContain(projectRoot);
+  });
+
   it("uses tighter list-specific rate and concurrency limits", async () => {
     const { projectRoot, executionRoot } = await makeWorkspace();
     const graph = await seedGraph(db, { projectRoot, executionRoot });
@@ -639,8 +797,26 @@ describeEmbeddedPostgres("workspace file resources", () => {
   });
 });
 
-describe("file resource route guards", () => {
+describeEmbeddedPostgres("file resource route guards", () => {
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let db: Db;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-file-resource-guards-");
+    db = createDb(tempDb.connectionString);
+  }, 60_000);
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
   it("enforces bounded rate and concurrency limits", async () => {
+    const companyId = crypto.randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Rate limit company",
+      issuePrefix: "RAT",
+    });
     let releaseSlowRead: (() => void) | null = null;
     let slowReadStarted: (() => void) | null = null;
     const slowRead = new Promise<void>((resolve) => {
@@ -650,7 +826,7 @@ describe("file resource route guards", () => {
       slowReadStarted = resolve;
     });
     const service: WorkspaceFileResourceService = {
-      getIssue: vi.fn(async () => ({ companyId: "company-1" })),
+      getIssue: vi.fn(async () => ({ companyId })),
       list: vi.fn(async () => {
         throw new Error("not used");
       }),
@@ -678,13 +854,13 @@ describe("file resource route guards", () => {
       req.actor = {
         type: "board",
         userId: "board-user",
-        companyIds: ["company-1"],
+        companyIds: [companyId],
         source: "session",
         isInstanceAdmin: false,
       };
       next();
     });
-    app.use("/api", fileResourceRoutes({} as Db, {
+    app.use("/api", fileResourceRoutes(db, {
       service,
       limiter: createFileResourceLimiter({ maxConcurrent: 1, maxRequests: 2, windowMs: 60_000 }),
     }));

@@ -218,12 +218,13 @@ export function fileResourceRoutes(db: Db, opts: {
     issueId: string;
     displayPath: string;
     error: unknown;
+    action?: "issue.file_resource_content_denied" | "issue.file_resource_resolve_denied";
   }) {
     await logActivity(db, {
       companyId: input.companyId,
       actorType: input.actor.actorType,
       actorId: input.actor.actorId,
-      action: "issue.file_resource_content_denied",
+      action: input.action ?? "issue.file_resource_content_denied",
       entityType: "issue",
       entityId: input.issueId,
       agentId: input.actor.agentId,
@@ -364,9 +365,41 @@ export function fileResourceRoutes(db: Db, opts: {
     assertCompanyAccess(req, issue.companyId);
     const actor = getActorInfo(req);
     const query = readQuery(req.query);
-    const release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+    let release: (() => void) | null = null;
+    try {
+      release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+    } catch (error) {
+      await logDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        displayPath: query.path,
+        error,
+        action: "issue.file_resource_resolve_denied",
+      });
+      throw error;
+    }
     try {
       const result = await svc.resolve(req.params.issueId, query);
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        action: "issue.file_resource_resolve",
+        entityType: "issue",
+        entityId: req.params.issueId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        details: activityDetails({
+          outcome: "success",
+          workspaceKind: result.workspaceKind,
+          workspaceId: result.workspaceId,
+          displayPath: result.displayPath,
+          byteSize: result.byteSize ?? null,
+          contentType: result.contentType ?? null,
+          denialReason: result.denialReason ?? null,
+        }),
+      });
       res.json(result);
     } catch (error) {
       await logDeniedAttempt({
@@ -375,10 +408,11 @@ export function fileResourceRoutes(db: Db, opts: {
         issueId: req.params.issueId,
         displayPath: query.path,
         error,
+        action: "issue.file_resource_resolve_denied",
       });
       throw error;
     } finally {
-      release();
+      release?.();
     }
   });
 
@@ -388,7 +422,19 @@ export function fileResourceRoutes(db: Db, opts: {
     assertCompanyAccess(req, issue.companyId);
     const actor = getActorInfo(req);
     const query = readQuery(req.query);
-    const release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+    let release: (() => void) | null = null;
+    try {
+      release = limiter.acquire(limiterKey(issue.companyId, actor.actorId, req.params.issueId));
+    } catch (error) {
+      await logDeniedAttempt({
+        companyId: issue.companyId,
+        actor,
+        issueId: req.params.issueId,
+        displayPath: query.path,
+        error,
+      });
+      throw error;
+    }
     try {
       let result: WorkspaceFileContent | null = null;
       try {
@@ -427,7 +473,7 @@ export function fileResourceRoutes(db: Db, opts: {
       res.set("X-Content-Type-Options", "nosniff");
       res.json(result);
     } finally {
-      release();
+      release?.();
     }
   });
 

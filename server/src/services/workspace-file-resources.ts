@@ -615,7 +615,7 @@ async function listChangedWorkspaceFiles(input: {
   return {
     items,
     scannedCount,
-    truncated: hitScanCap || paths.length > scannedCount || items.length >= input.limit,
+    truncated: hitScanCap || paths.length > scannedCount || items.length > input.limit,
   };
 }
 
