@@ -1,5 +1,5 @@
 import { createContext, useContext, useCallback, useMemo, type ReactNode } from "react";
-import { useLocation, useNavigate } from "@/lib/router";
+import { useLocation, useNavigate, type NavigateOptions } from "@/lib/router";
 import type { WorkspaceFileSelector } from "@paperclipai/shared";
 import type { ParsedWorkspaceFileRef } from "@/lib/workspace-file-parser";
 
@@ -30,6 +30,11 @@ export interface FileViewerContextValue {
 }
 
 const FileViewerContext = createContext<FileViewerContextValue | null>(null);
+
+export const FILE_VIEWER_NAVIGATE_OPTIONS = {
+  replace: false,
+  preventScrollReset: true,
+} satisfies NavigateOptions;
 
 export function readFileViewerStateFromSearch(search: string): FileViewerUrlState | null {
   const params = new URLSearchParams(search);
@@ -100,7 +105,7 @@ export function FileViewerProvider({ issueId, children }: FileViewerProviderProp
     (nextSearch: string) => {
       navigate(
         { pathname: location.pathname, hash: location.hash, search: nextSearch },
-        { state: location.state, replace: false },
+        { ...FILE_VIEWER_NAVIGATE_OPTIONS, state: location.state },
       );
     },
     [location.hash, location.pathname, location.state, navigate],

@@ -2,9 +2,17 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  FILE_VIEWER_NAVIGATE_OPTIONS,
   readFileViewerStateFromSearch,
   writeFileViewerStateToSearch,
 } from "./FileViewerContext";
+
+describe("FILE_VIEWER_NAVIGATE_OPTIONS", () => {
+  it("preserves page scroll when the viewer updates URL search params", () => {
+    expect(FILE_VIEWER_NAVIGATE_OPTIONS.preventScrollReset).toBe(true);
+    expect(FILE_VIEWER_NAVIGATE_OPTIONS.replace).toBe(false);
+  });
+});
 
 describe("readFileViewerStateFromSearch", () => {
   it("returns null when no file param is present", () => {
