@@ -3,11 +3,14 @@ import { buildAgentMentionHref } from "@paperclipai/shared";
 import {
   bodyHasAgentMention,
   classifyAssigneeHandoff,
+  computePauseAffectsSummary,
   computeComposerHandoffPreview,
+  describeReassignInterrupt,
   extractAgentMentionIds,
   findPlainAgentNameCandidate,
   isOperatorInterruptedRun,
   resolveRunStatusPresentation,
+  type PauseAffectsIssueLike,
 } from "./interrupt-handoff";
 
 const QA_ID = "agent-qa-1111";
@@ -179,5 +182,70 @@ describe("classifyAssigneeHandoff", () => {
     const info = classifyAssigneeHandoff({ agentId: null, userId: null });
     expect(info.kind).toBe("unassigned");
     expect(info.wakeText).toMatch(/no agent selected/);
+  });
+});
+
+describe("describeReassignInterrupt", () => {
+  it("names the running agent in the banner and confirm", () => {
+    const copy = describeReassignInterrupt({ runningAgentName: "ClaudeCoder" });
+    expect(copy.banner).toBe("ClaudeCoder is running — changing the assignee will interrupt this run.");
+    expect(copy.confirmAction).toBe("Interrupt & assign");
+    expect(copy.cancelAction).toBe("Cancel");
+  });
+
+  it("falls back to a generic subject when no name is known", () => {
+    expect(describeReassignInterrupt().banner).toMatch(/^An agent is running/);
+    expect(describeReassignInterrupt({ runningAgentName: "  " }).banner).toMatch(/^An agent is running/);
+  });
+});
+
+describe("computePauseAffectsSummary", () => {
+  const issue = (over: Partial<PauseAffectsIssueLike>): PauseAffectsIssueLike => ({
+    assigneeAgentId: null,
+    assigneeUserId: null,
+    activeRun: null,
+    ...over,
+  });
+  const bucket = (summary: ReturnType<typeof computePauseAffectsSummary>, key: string) =>
+    summary.buckets.find((b) => b.key === key)!;
+
+  it("partitions affected issues into disjoint buckets", () => {
+    const summary = computePauseAffectsSummary([
+      issue({ assigneeAgentId: "a1", activeRun: { status: "running" } }),
+      issue({ assigneeAgentId: "a2", activeRun: { status: "queued" } }),
+      issue({ assigneeAgentId: "a3" }),
+      issue({ assigneeUserId: "u1" }),
+      issue({}),
+    ]);
+    expect(bucket(summary, "live_runs").count).toBe(1);
+    expect(bucket(summary, "queued_wakes").count).toBe(1);
+    expect(bucket(summary, "agent_owned").count).toBe(1);
+    expect(bucket(summary, "human_owned").count).toBe(1);
+    expect(bucket(summary, "static").count).toBe(1);
+    expect(summary.affectedIssueCount).toBe(5);
+    expect(summary.nothingLive).toBe(false);
+  });
+
+  it("ignores skipped issues", () => {
+    const summary = computePauseAffectsSummary([
+      issue({ assigneeAgentId: "a1", activeRun: { status: "running" }, skipped: true }),
+      issue({ assigneeUserId: "u1" }),
+    ]);
+    expect(summary.affectedIssueCount).toBe(1);
+    expect(bucket(summary, "live_runs").count).toBe(0);
+    expect(bucket(summary, "human_owned").count).toBe(1);
+  });
+
+  it("flags nothingLive when no run is live or queued", () => {
+    const summary = computePauseAffectsSummary([issue({ assigneeUserId: "u1" }), issue({})]);
+    expect(summary.nothingLive).toBe(true);
+  });
+
+  it("an active run wins over the issue's owner bucket", () => {
+    const summary = computePauseAffectsSummary([
+      issue({ assigneeAgentId: "a1", activeRun: { status: "running" } }),
+    ]);
+    expect(bucket(summary, "live_runs").count).toBe(1);
+    expect(bucket(summary, "agent_owned").count).toBe(0);
   });
 });

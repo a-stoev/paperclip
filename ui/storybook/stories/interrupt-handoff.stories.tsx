@@ -1,15 +1,22 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, User } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   AssigneeChip,
+  AssigneeRunningBanner,
   ComposerHandoffPreviewRow,
   ComposerMentionCoach,
   HandoffWakeRow,
+  InterruptAssignConfirm,
+  PauseAffectsSummaryView,
   RunStatusBadge,
   type HandoffChipResolvers,
 } from "@/components/interrupt-handoff/InterruptHandoffViews";
-import { computeComposerHandoffPreview } from "@/lib/interrupt-handoff";
+import {
+  computeComposerHandoffPreview,
+  computePauseAffectsSummary,
+  describeReassignInterrupt,
+} from "@/lib/interrupt-handoff";
 
 /**
  * Visual states for the interrupt-handoff UX clarity work (PAP-10669). Each card
@@ -157,6 +164,71 @@ export const PlainTextWarning: Story = {
     return (
       <div className="max-w-xl p-4" data-testid="interrupt-handoff-plain-warning">
         <ComposerHandoffPreviewRow preview={preview} resolvers={resolvers} />
+      </div>
+    );
+  },
+};
+
+/** Surface 2 — standalone assignee picker: grouped sections, the live-run
+ * banner, and the "Interrupt & assign" confirm step shown mid-run. */
+export const AssigneePicker: Story = {
+  render: () => {
+    const copy = describeReassignInterrupt({ runningAgentName: "ClaudeCoder" });
+    const sectionHeader = (text: string) => (
+      <div className="px-2 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+        {text}
+      </div>
+    );
+    return (
+      <div className="flex flex-col gap-6 p-4 sm:flex-row" data-testid="interrupt-handoff-assignee-picker">
+        <div className="w-60 space-y-1 rounded-md border border-border bg-popover p-1">
+          <div className="px-1 pt-1">
+            <AssigneeRunningBanner copy={copy} />
+          </div>
+          {sectionHeader("Agents")}
+          <button className="flex w-full items-center gap-2 rounded bg-accent px-2 py-1.5 text-left text-xs">
+            ClaudeCoder
+          </button>
+          <button className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent/50">
+            QA
+          </button>
+          {sectionHeader("Board users")}
+          <button className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent/50">
+            <User className="h-3 w-3 text-muted-foreground" /> Assign to me
+          </button>
+        </div>
+        <div className="w-60 rounded-md border border-border bg-popover p-1">
+          <InterruptAssignConfirm
+            copy={copy}
+            to={qa}
+            resolvers={resolvers}
+            onConfirm={() => {}}
+            onCancel={() => {}}
+          />
+        </div>
+      </div>
+    );
+  },
+};
+
+/** Surface 4 — pause/hold dialog "What this affects" bucket summary. */
+export const PauseAffects: Story = {
+  render: () => {
+    const live = computePauseAffectsSummary([
+      { assigneeAgentId: "agent-claude", assigneeUserId: null, activeRun: { status: "running" } },
+      { assigneeAgentId: "agent-qa", assigneeUserId: null, activeRun: { status: "queued" } },
+      { assigneeAgentId: "agent-claude", assigneeUserId: null, activeRun: null },
+      { assigneeAgentId: null, assigneeUserId: "user-board", activeRun: null },
+      { assigneeAgentId: null, assigneeUserId: null, activeRun: null },
+    ]);
+    const idle = computePauseAffectsSummary([
+      { assigneeAgentId: null, assigneeUserId: "user-board", activeRun: null },
+      { assigneeAgentId: null, assigneeUserId: null, activeRun: null },
+    ]);
+    return (
+      <div className="flex max-w-xl flex-col gap-4 p-4" data-testid="interrupt-handoff-pause-affects">
+        <PauseAffectsSummaryView summary={live} />
+        <PauseAffectsSummaryView summary={idle} />
       </div>
     );
   },

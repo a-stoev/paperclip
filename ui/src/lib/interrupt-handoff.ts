@@ -313,3 +313,127 @@ export function classifyAssigneeHandoff(
     wakeText: "not created — no agent selected. Mention @agent or pick an assignee to dispatch.",
   };
 }
+
+// --- Standalone assignee picker interrupt (PAP-10675, design surface 2) -------
+
+export interface ReassignInterruptCopy {
+  /** `role=status` banner shown while a run is live and the picker is open. */
+  banner: string;
+  /** Heading for the "Interrupt & assign" confirm step. */
+  confirmTitle: string;
+  /** Primary action label for the confirm step. */
+  confirmAction: string;
+  /** Label for backing out of the confirm step. */
+  cancelAction: string;
+}
+
+/**
+ * Copy for the assignee picker's live-run states: a banner warning that an
+ * in-flight run will be interrupted, and the confirm step shown when the
+ * operator picks a *different* target mid-run. Naming the running agent keeps
+ * the interrupt consequence concrete instead of a bare "are you sure".
+ */
+export function describeReassignInterrupt(opts: { runningAgentName?: string | null } = {}): ReassignInterruptCopy {
+  const who = opts.runningAgentName?.trim() || "An agent";
+  return {
+    banner: `${who} is running — changing the assignee will interrupt this run.`,
+    confirmTitle: "Interrupt the current run?",
+    confirmAction: "Interrupt & assign",
+    cancelAction: "Cancel",
+  };
+}
+
+// --- Pause/hold "What this affects" buckets (PAP-10675, design surface 4) ------
+
+export type PauseAffectsBucketKey =
+  | "live_runs"
+  | "queued_wakes"
+  | "agent_owned"
+  | "human_owned"
+  | "static";
+
+export interface PauseAffectsIssueLike {
+  assigneeAgentId: string | null;
+  assigneeUserId: string | null;
+  activeRun: { status: "queued" | "running" } | null;
+  skipped?: boolean;
+}
+
+export interface PauseAffectsBucket {
+  key: PauseAffectsBucketKey;
+  label: string;
+  count: number;
+  /** One-line clarifier of what pausing does to this bucket. */
+  detail: string;
+}
+
+export interface PauseAffectsSummary {
+  buckets: PauseAffectsBucket[];
+  /** Total non-skipped issues the operation affects. */
+  affectedIssueCount: number;
+  /** True when no run is live or queued — there is nothing to interrupt. */
+  nothingLive: boolean;
+}
+
+const PAUSE_BUCKET_LABEL: Record<PauseAffectsBucketKey, string> = {
+  live_runs: "Live agent runs",
+  queued_wakes: "Queued wakes",
+  agent_owned: "Agent-owned",
+  human_owned: "Human-owned",
+  static: "Static",
+};
+
+const PAUSE_BUCKET_DETAIL: Record<PauseAffectsBucketKey, string> = {
+  live_runs: "interrupted now, re-queued when you resume",
+  queued_wakes: "held — they won't start until you resume",
+  agent_owned: "assigned to an agent; no run is live",
+  human_owned: "owned by a board user; pausing won't notify them",
+  static: "no assignee; nothing was going to run",
+};
+
+/**
+ * Partition the issues an operation affects into the five disjoint buckets the
+ * pause dialog summarises. Each non-skipped issue lands in exactly one bucket:
+ * a live run, a queued wake, or — when nothing is in flight — by owner kind.
+ */
+export function computePauseAffectsSummary(
+  issues: readonly PauseAffectsIssueLike[],
+): PauseAffectsSummary {
+  const counts: Record<PauseAffectsBucketKey, number> = {
+    live_runs: 0,
+    queued_wakes: 0,
+    agent_owned: 0,
+    human_owned: 0,
+    static: 0,
+  };
+  let affectedIssueCount = 0;
+
+  for (const issue of issues) {
+    if (issue.skipped) continue;
+    affectedIssueCount += 1;
+    if (issue.activeRun?.status === "running") counts.live_runs += 1;
+    else if (issue.activeRun?.status === "queued") counts.queued_wakes += 1;
+    else if (issue.assigneeAgentId) counts.agent_owned += 1;
+    else if (issue.assigneeUserId) counts.human_owned += 1;
+    else counts.static += 1;
+  }
+
+  const order: PauseAffectsBucketKey[] = [
+    "live_runs",
+    "queued_wakes",
+    "agent_owned",
+    "human_owned",
+    "static",
+  ];
+
+  return {
+    buckets: order.map((key) => ({
+      key,
+      label: PAUSE_BUCKET_LABEL[key],
+      count: counts[key],
+      detail: PAUSE_BUCKET_DETAIL[key],
+    })),
+    affectedIssueCount,
+    nothingLive: counts.live_runs === 0 && counts.queued_wakes === 0,
+  };
+}

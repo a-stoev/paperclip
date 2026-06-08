@@ -6,13 +6,20 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AssigneeChip,
+  AssigneeRunningBanner,
   ComposerHandoffPreviewRow,
   ComposerMentionCoach,
   HandoffWakeRow,
+  InterruptAssignConfirm,
+  PauseAffectsSummaryView,
   RunStatusBadge,
   type HandoffChipResolvers,
 } from "./InterruptHandoffViews";
-import { computeComposerHandoffPreview } from "../../lib/interrupt-handoff";
+import {
+  computeComposerHandoffPreview,
+  computePauseAffectsSummary,
+  describeReassignInterrupt,
+} from "../../lib/interrupt-handoff";
 
 const resolvers: HandoffChipResolvers = {
   agentMap: new Map([
@@ -178,5 +185,66 @@ describe("ComposerMentionCoach", () => {
     const dismissBtn = host.querySelector<HTMLButtonElement>("[aria-label='Dismiss suggestion']")!;
     act(() => dismissBtn.click());
     expect(onDismiss).toHaveBeenCalledOnce();
+  });
+});
+
+describe("AssigneeRunningBanner", () => {
+  it("announces the interrupt as a status with the running agent name", () => {
+    const host = mount(
+      <AssigneeRunningBanner copy={describeReassignInterrupt({ runningAgentName: "ClaudeCoder" })} />,
+    );
+    const banner = host.querySelector<HTMLElement>("[data-testid='assignee-running-banner']")!;
+    expect(banner.getAttribute("role")).toBe("status");
+    expect(banner.textContent).toContain("ClaudeCoder is running");
+  });
+});
+
+describe("InterruptAssignConfirm", () => {
+  it("renders the target chip and wires confirm/cancel", () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    const host = mount(
+      <InterruptAssignConfirm
+        copy={describeReassignInterrupt({ runningAgentName: "ClaudeCoder" })}
+        to={{ agentId: "agent-qa", userId: null }}
+        resolvers={resolvers}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    expect(host.querySelector("[data-testid='handoff-assignee-chip']")?.textContent).toContain("QA");
+    const confirmBtn = host.querySelector<HTMLButtonElement>("[data-testid='interrupt-assign-confirm-action']")!;
+    act(() => confirmBtn.click());
+    expect(onConfirm).toHaveBeenCalledOnce();
+    const cancelBtn = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find(
+      (b) => b.textContent === "Cancel",
+    )!;
+    act(() => cancelBtn.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+});
+
+describe("PauseAffectsSummaryView", () => {
+  it("renders only non-zero buckets with counts", () => {
+    const summary = computePauseAffectsSummary([
+      { assigneeAgentId: "a1", assigneeUserId: null, activeRun: { status: "running" } },
+      { assigneeAgentId: null, assigneeUserId: "u1", activeRun: null },
+    ]);
+    const host = mount(<PauseAffectsSummaryView summary={summary} />);
+    expect(host.querySelector("[data-bucket='live_runs']")?.textContent).toContain("1");
+    expect(host.querySelector("[data-bucket='human_owned']")?.textContent).toContain("1");
+    // Empty buckets are hidden.
+    expect(host.querySelector("[data-bucket='static']")).toBeNull();
+    expect(host.querySelector("[data-testid='pause-nothing-live']")).toBeNull();
+  });
+
+  it("shows the 'Nothing live to pause' status when no run is live", () => {
+    const summary = computePauseAffectsSummary([
+      { assigneeAgentId: null, assigneeUserId: "u1", activeRun: null },
+    ]);
+    const host = mount(<PauseAffectsSummaryView summary={summary} />);
+    const note = host.querySelector<HTMLElement>("[data-testid='pause-nothing-live']")!;
+    expect(note.getAttribute("role")).toBe("status");
+    expect(note.textContent).toContain("Nothing live to pause");
   });
 });

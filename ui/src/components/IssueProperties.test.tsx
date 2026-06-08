@@ -385,6 +385,73 @@ describe("IssueProperties", () => {
     document.body.innerHTML = "";
   });
 
+  it("groups the assignee picker and gates a live-run reassign behind an interrupt confirm", async () => {
+    const minimalAgent = (id: string, name: string) =>
+      ({
+        id,
+        name,
+        role: "",
+        title: null,
+        icon: null,
+        status: "active",
+        orgChainHealth: { status: "ok" },
+      } as unknown as Parameters<typeof mockAgentsApi.list.mockResolvedValue>[0][number]);
+    mockAgentsApi.list.mockResolvedValue([minimalAgent("agent-1", "ClaudeCoder"), minimalAgent("agent-2", "QA")]);
+    const onUpdate = vi.fn();
+    const root = renderProperties(container, {
+      issue: createIssue({ assigneeAgentId: "agent-1" }),
+      childIssues: [],
+      onUpdate,
+      inline: true,
+      hasActiveRun: true,
+    });
+    await flush();
+
+    // Wait for the agents query to resolve so the current assignee renders.
+    let trigger: HTMLButtonElement | undefined;
+    await waitForAssertion(() => {
+      trigger = Array.from(container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("ClaudeCoder"),
+      );
+      expect(trigger).toBeTruthy();
+    });
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    // Live-run banner + grouped section headers are present.
+    expect(container.querySelector("[data-testid='assignee-running-banner']")?.textContent).toContain(
+      "ClaudeCoder is running",
+    );
+    expect(container.textContent).toContain("Agents");
+    expect(container.textContent).toContain("Board users");
+
+    // Picking a different agent mid-run stages a confirm rather than applying.
+    const qaOption = Array.from(container.querySelectorAll("button")).find(
+      (b) => b.textContent?.trim() === "QA",
+    );
+    expect(qaOption).toBeTruthy();
+    await act(async () => {
+      qaOption!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(container.querySelector("[data-testid='interrupt-assign-confirm']")).not.toBeNull();
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    // Confirming applies the reassignment.
+    const confirmBtn = container.querySelector<HTMLButtonElement>(
+      "[data-testid='interrupt-assign-confirm-action']",
+    )!;
+    await act(async () => {
+      confirmBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(onUpdate).toHaveBeenCalledWith({ assigneeAgentId: "agent-2", assigneeUserId: null });
+
+    act(() => root.unmount());
+  });
+
   it("always exposes the add sub-issue action", async () => {
     const onAddSubIssue = vi.fn();
     const root = renderProperties(container, {
