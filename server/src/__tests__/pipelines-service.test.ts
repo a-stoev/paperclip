@@ -5,13 +5,18 @@ import {
   agents,
   companies,
   createDb,
+  heartbeatRuns,
+  issueComments,
+  issues,
   pipelineAutomationExecutions,
   pipelineCaseBlockers,
+  pipelineCaseIssueLinks,
   pipelineCaseEvents,
   pipelineCases,
   pipelineStages,
   pipelineTransitions,
   pipelines,
+  routineRuns,
   routines,
 } from "@paperclipai/db";
 import {
@@ -19,6 +24,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { pipelineService, type PipelineActor } from "../services/pipelines.ts";
+import { routineService } from "../services/routines.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -35,21 +41,27 @@ describeEmbeddedPostgres("pipelineService", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   const userActor: PipelineActor = { type: "user", userId: "board-user" };
+  const noopHeartbeat = { wakeup: async () => null };
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-pipelines-service-");
     db = createDb(tempDb.connectionString);
-    svc = pipelineService(db);
+    svc = pipelineService(db, { heartbeat: noopHeartbeat });
   }, 20_000);
 
   afterEach(async () => {
     await db.delete(pipelineAutomationExecutions);
     await db.delete(pipelineCaseBlockers);
+    await db.delete(pipelineCaseIssueLinks);
     await db.delete(pipelineCaseEvents);
     await db.delete(pipelineCases);
     await db.delete(pipelineTransitions);
     await db.delete(pipelineStages);
     await db.delete(pipelines);
+    await db.delete(issueComments);
+    await db.delete(routineRuns);
+    await db.delete(heartbeatRuns);
+    await db.delete(issues);
     await db.delete(routines);
     await db.delete(agents);
     await db.delete(companies);
@@ -78,6 +90,30 @@ describeEmbeddedPostgres("pipelineService", () => {
     });
     const stages = await svc.listStages(company.id, pipeline.id);
     return { company, pipeline, stages, byKey: new Map(stages.map((stage) => [stage.key, stage])) };
+  }
+
+  async function seedRoutine(companyId: string, title = "Routine") {
+    const [agent] = await db.insert(agents).values({
+      companyId,
+      name: `${title} Agent`,
+      role: "engineer",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    }).returning();
+    return routineService(db, { heartbeat: noopHeartbeat }).create(companyId, {
+      projectId: null,
+      goalId: null,
+      parentIssueId: null,
+      title,
+      description: null,
+      assigneeAgentId: agent!.id,
+      priority: "medium",
+      status: "active",
+      concurrencyPolicy: "always_enqueue",
+      catchUpPolicy: "skip_missed",
+    }, {});
   }
 
   async function eventCount(caseId: string) {
@@ -336,10 +372,11 @@ describeEmbeddedPostgres("pipelineService", () => {
       title: "Blocking case",
       actor: userActor,
     });
-    await db.insert(pipelineCaseBlockers).values({
+    await svc.replaceBlockers({
       companyId: company.id,
       caseId: blocked.case.id,
-      blockedByCaseId: blocker.case.id,
+      blockedByCaseIds: [blocker.case.id],
+      actor: userActor,
     });
 
     await expect(
@@ -348,6 +385,25 @@ describeEmbeddedPostgres("pipelineService", () => {
         caseId: blocked.case.id,
         toStageKey: "in_progress",
         expectedVersion: 1,
+        actor: userActor,
+      }),
+    ).rejects.toMatchObject({ status: 409, details: { code: "blocked" } });
+
+    const reviewMove = await svc.transitionCase({
+      companyId: company.id,
+      caseId: blocked.case.id,
+      toStageKey: "review",
+      expectedVersion: 1,
+      actor: userActor,
+    });
+    expect(reviewMove.case.version).toBe(2);
+
+    await expect(
+      svc.transitionCase({
+        companyId: company.id,
+        caseId: blocked.case.id,
+        toStageKey: "done",
+        expectedVersion: 2,
         actor: userActor,
       }),
     ).rejects.toMatchObject({ status: 409, details: { code: "blocked" } });
@@ -363,10 +419,229 @@ describeEmbeddedPostgres("pipelineService", () => {
       companyId: company.id,
       caseId: blocked.case.id,
       toStageKey: "in_progress",
+      expectedVersion: 2,
+      actor: userActor,
+    });
+    expect(moved.case.version).toBe(3);
+    const events = await svc.listCaseEvents(company.id, blocked.case.id);
+    expect(events.map((event) => event.type)).toContain("blockers_resolved");
+  });
+
+  it("keeps cancelled blockers unsatisfied until replaced", async () => {
+    const { company, pipeline } = await seedPipeline();
+    const blocked = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "blocked-cancelled",
+      title: "Blocked case",
+      actor: userActor,
+    });
+    const blocker = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "blocker-cancelled",
+      title: "Cancelled blocker",
+      actor: userActor,
+    });
+    await svc.replaceBlockers({
+      companyId: company.id,
+      caseId: blocked.case.id,
+      blockedByCaseIds: [blocker.case.id],
+      actor: userActor,
+    });
+    await svc.transitionCase({
+      companyId: company.id,
+      caseId: blocker.case.id,
+      toStageKey: "cancelled",
+      expectedVersion: 1,
+      actor: userActor,
+    });
+
+    await expect(
+      svc.transitionCase({
+        companyId: company.id,
+        caseId: blocked.case.id,
+        toStageKey: "in_progress",
+        expectedVersion: 1,
+        actor: userActor,
+      }),
+    ).rejects.toMatchObject({ status: 409, details: { code: "blocked" } });
+
+    await svc.replaceBlockers({ companyId: company.id, caseId: blocked.case.id, blockedByCaseIds: [], actor: userActor });
+    const moved = await svc.transitionCase({
+      companyId: company.id,
+      caseId: blocked.case.id,
+      toStageKey: "in_progress",
       expectedVersion: 1,
       actor: userActor,
     });
     expect(moved.case.version).toBe(2);
+  });
+
+  it("rejects parent and blocker cycles and enforces parent depth", async () => {
+    const { company, pipeline } = await seedPipeline();
+    const a = await svc.ingestCase({ companyId: company.id, pipelineId: pipeline.id, caseKey: "a", title: "A", actor: userActor });
+    const b = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "b",
+      title: "B",
+      parentCaseId: a.case.id,
+      actor: userActor,
+    });
+
+    await expect(
+      svc.patchCaseContent({
+        companyId: company.id,
+        caseId: a.case.id,
+        parentCaseId: b.case.id,
+        expectedVersion: 1,
+        actor: userActor,
+      }),
+    ).rejects.toMatchObject({ status: 409, details: { code: "parent_cycle" } });
+
+    await svc.replaceBlockers({ companyId: company.id, caseId: a.case.id, blockedByCaseIds: [b.case.id], actor: userActor });
+    await expect(
+      svc.replaceBlockers({ companyId: company.id, caseId: b.case.id, blockedByCaseIds: [a.case.id], actor: userActor }),
+    ).rejects.toMatchObject({ status: 409, details: { code: "blocker_cycle" } });
+
+    let parentCaseId: string | null = null;
+    for (let index = 0; index < 32; index += 1) {
+      const created = await svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey: `chain-${index}`,
+        title: `Chain ${index}`,
+        parentCaseId,
+        actor: userActor,
+      });
+      parentCaseId = created.case.id;
+    }
+    await expect(
+      svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey: "too-deep",
+        title: "Too deep",
+        parentCaseId,
+        actor: userActor,
+      }),
+    ).rejects.toMatchObject({ status: 422, details: { code: "parent_depth_exceeded" } });
+  });
+
+  it("rolls up a three-level tree, updates counters, and emits children_terminal once", async () => {
+    const { company, pipeline } = await seedPipeline();
+    const root = await svc.ingestCase({ companyId: company.id, pipelineId: pipeline.id, caseKey: "root", title: "Root", actor: userActor });
+    const [linkedIssue] = await db.insert(issues).values({
+      companyId: company.id,
+      title: "Root conversation",
+      status: "todo",
+      priority: "medium",
+    }).returning();
+    await db.insert(pipelineCaseIssueLinks).values({
+      companyId: company.id,
+      caseId: root.case.id,
+      issueId: linkedIssue!.id,
+      role: "conversation",
+    });
+    const childA = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "child-a",
+      title: "Child A",
+      parentCaseId: root.case.id,
+      actor: userActor,
+    });
+    const childB = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "child-b",
+      title: "Child B",
+      parentCaseId: root.case.id,
+      actor: userActor,
+    });
+    const childC = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "child-c",
+      title: "Child C",
+      parentCaseId: root.case.id,
+      actor: userActor,
+    });
+    const grandA = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "grand-a",
+      title: "Grand A",
+      parentCaseId: childA.case.id,
+      actor: userActor,
+    });
+    const grandB = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "grand-b",
+      title: "Grand B",
+      parentCaseId: childA.case.id,
+      actor: userActor,
+    });
+
+    await svc.transitionCase({ companyId: company.id, caseId: childB.case.id, toStageKey: "done", expectedVersion: 1, actor: userActor });
+    await svc.transitionCase({ companyId: company.id, caseId: childC.case.id, toStageKey: "done", expectedVersion: 1, actor: userActor });
+    await svc.transitionCase({ companyId: company.id, caseId: grandA.case.id, toStageKey: "done", expectedVersion: 1, actor: userActor });
+    await svc.transitionCase({ companyId: company.id, caseId: grandB.case.id, toStageKey: "cancelled", expectedVersion: 1, actor: userActor });
+    await svc.transitionCase({ companyId: company.id, caseId: childA.case.id, toStageKey: "done", expectedVersion: 1, actor: userActor });
+
+    expect(await svc.getCaseRollup(company.id, root.case.id)).toEqual({
+      total: 5,
+      done: 4,
+      cancelled: 1,
+      open: 0,
+      complete: true,
+    });
+    const [freshRoot] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, root.case.id));
+    const [freshChildA] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, childA.case.id));
+    expect(freshRoot!.childCount).toBe(3);
+    expect(freshRoot!.terminalChildCount).toBe(3);
+    expect(freshChildA!.childCount).toBe(2);
+    expect(freshChildA!.terminalChildCount).toBe(2);
+    const rootEvents = await svc.listCaseEvents(company.id, root.case.id);
+    expect(rootEvents.filter((event) => event.type === "children_terminal")).toHaveLength(1);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, linkedIssue!.id));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]!.authorType).toBe("system");
+    expect(comments[0]!.body).toContain("All child cases");
+  });
+
+  it("auto-advances a parent when all descendants are terminal", async () => {
+    const company = await seedCompany();
+    const pipeline = await svc.createPipeline({
+      companyId: company.id,
+      key: "auto-children",
+      name: "Auto children",
+      actor: userActor,
+      stages: [
+        { key: "intake", name: "Intake", kind: "open", config: { autoAdvanceOnChildrenTerminal: "done" } },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    });
+    const root = await svc.ingestCase({ companyId: company.id, pipelineId: pipeline.id, caseKey: "auto-root", title: "Root", actor: userActor });
+    const child = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "auto-child",
+      title: "Child",
+      parentCaseId: root.case.id,
+      actor: userActor,
+    });
+
+    await svc.transitionCase({ companyId: company.id, caseId: child.case.id, toStageKey: "done", expectedVersion: 1, actor: userActor });
+
+    const [freshRoot] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, root.case.id));
+    expect(freshRoot!.terminalKind).toBe("done");
+    expect(freshRoot!.version).toBe(2);
+    const rootEvents = await svc.listCaseEvents(company.id, root.case.id);
+    expect(rootEvents.map((event) => event.type)).toEqual(["ingested", "children_terminal", "transitioned"]);
   });
 
   it("records suggestion supersede, accept, and dismiss lifecycles", async () => {
@@ -476,22 +751,9 @@ describeEmbeddedPostgres("pipelineService", () => {
     expect(await eventCount(created.case.id)).toBe(5);
   });
 
-  it("creates a stage-entry automation ledger idempotently with the transition event", async () => {
+  it("fires a stage-entry automation routine once and keeps crash-retry idempotent", async () => {
     const company = await seedCompany();
-    const [agent] = await db.insert(agents).values({
-      companyId: company.id,
-      name: "Routine Agent",
-      role: "engineer",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
-    }).returning();
-    const [routine] = await db.insert(routines).values({
-      companyId: company.id,
-      title: "Draft on enter",
-      assigneeAgentId: agent!.id,
-    }).returning();
+    const routine = await seedRoutine(company.id, "Draft on enter");
     const pipeline = await svc.createPipeline({
       companyId: company.id,
       key: "automation",
@@ -499,7 +761,7 @@ describeEmbeddedPostgres("pipelineService", () => {
       actor: userActor,
       stages: [
         { key: "intake", name: "Intake", kind: "open" },
-        { key: "drafting", name: "Drafting", kind: "working", config: { onEnter: { type: "run_routine", routineId: routine!.id } } },
+        { key: "drafting", name: "Drafting", kind: "working", config: { onEnter: { type: "run_routine", routineId: routine.id } } },
         { key: "done", name: "Done", kind: "done" },
         { key: "cancelled", name: "Cancelled", kind: "cancelled" },
       ],
@@ -519,9 +781,148 @@ describeEmbeddedPostgres("pipelineService", () => {
       expectedVersion: 1,
       actor: userActor,
     });
-    expect(moved.automationLedger?.routineId).toBe(routine!.id);
+    expect(moved.automationLedger?.routineId).toBe(routine.id);
+    expect(moved.automationExecution.status).toBe("succeeded");
     const ledgers = await db.select().from(pipelineAutomationExecutions);
     expect(ledgers).toHaveLength(1);
     expect(ledgers[0]!.triggeringEventId).toBe(moved.event.id);
+    expect(ledgers[0]!.executionIssueId).toBeTruthy();
+    const runsAfterTransition = await db.select().from(routineRuns);
+    expect(runsAfterTransition).toHaveLength(1);
+    const linksAfterTransition = await db.select().from(pipelineCaseIssueLinks);
+    expect(linksAfterTransition).toHaveLength(1);
+    expect(linksAfterTransition[0]!.role).toBe("automation");
+
+    const [issue] = await db.select().from(issues).where(eq(issues.id, ledgers[0]!.executionIssueId!));
+    expect(issue!.description).toContain("Pipeline Case Context");
+    expect(issue!.description).toContain("untrustedContent");
+
+    const triggerEvent = await db.insert(pipelineCaseEvents).values({
+      companyId: company.id,
+      caseId: created.case.id,
+      type: "transitioned",
+      actorType: "system",
+      toStageId: moved.case.stageId,
+      payload: { simulatedCrash: true },
+    }).returning();
+    const automationId = ledgers[0]!.automationId;
+    await db.insert(pipelineAutomationExecutions).values({
+      companyId: company.id,
+      caseId: created.case.id,
+      automationId,
+      triggeringEventId: triggerEvent[0]!.id,
+      routineId: routine.id,
+      status: "failed",
+      error: "pending_dispatch",
+    });
+
+    const firstRetry = await svc.retryAutomation({
+      companyId: company.id,
+      caseId: created.case.id,
+      automationId,
+      actor: userActor,
+    });
+    const secondRetry = await svc.retryAutomation({
+      companyId: company.id,
+      caseId: created.case.id,
+      automationId,
+      actor: userActor,
+    });
+    expect(firstRetry.status).toBe("succeeded");
+    expect(secondRetry.status).toBe("succeeded");
+    const runsAfterRetries = await db.select().from(routineRuns);
+    expect(runsAfterRetries).toHaveLength(2);
+    const crashExecutions = await db
+      .select()
+      .from(pipelineAutomationExecutions)
+      .where(eq(pipelineAutomationExecutions.triggeringEventId, triggerEvent[0]!.id));
+    expect(crashExecutions).toHaveLength(1);
+    expect(crashExecutions[0]!.executionIssueId).toBeTruthy();
+    const crashLinks = await db
+      .select()
+      .from(pipelineCaseIssueLinks)
+      .where(eq(pipelineCaseIssueLinks.issueId, crashExecutions[0]!.executionIssueId!));
+    expect(crashLinks).toHaveLength(1);
+  });
+
+  it("rejects cross-company stage automation routines at save and execution", async () => {
+    const company = await seedCompany();
+    const otherCompany = await seedCompany();
+    const routine = await seedRoutine(company.id, "Own routine");
+    const otherRoutine = await seedRoutine(otherCompany.id, "Other routine");
+
+    await expect(svc.createPipeline({
+      companyId: company.id,
+      key: "bad-automation",
+      name: "Bad automation",
+      actor: userActor,
+      stages: [
+        { key: "intake", name: "Intake", kind: "open" },
+        { key: "drafting", name: "Drafting", kind: "working", config: { onEnter: { type: "run_routine", routineId: otherRoutine.id } } },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    })).rejects.toMatchObject({ status: 422, details: { code: "validation" } });
+
+    const pipeline = await svc.createPipeline({
+      companyId: company.id,
+      key: "execution-automation",
+      name: "Execution automation",
+      actor: userActor,
+      stages: [
+        { key: "intake", name: "Intake", kind: "open" },
+        { key: "drafting", name: "Drafting", kind: "working", config: { onEnter: { type: "run_routine", routineId: routine.id } } },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    });
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "cross-company-execution",
+      title: "Cross-company execution",
+      actor: userActor,
+    });
+    const moved = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "drafting",
+      expectedVersion: 1,
+      actor: userActor,
+    });
+    expect(moved.automationExecution.status).toBe("succeeded");
+
+    const [triggerEvent] = await db.insert(pipelineCaseEvents).values({
+      companyId: company.id,
+      caseId: created.case.id,
+      type: "transitioned",
+      actorType: "system",
+      toStageId: moved.case.stageId,
+      payload: { crossCompanyRoutine: true },
+    }).returning();
+    const [badExecution] = await db.insert(pipelineAutomationExecutions).values({
+      companyId: company.id,
+      caseId: created.case.id,
+      automationId: moved.automationLedger!.automationId,
+      triggeringEventId: triggerEvent!.id,
+      routineId: otherRoutine.id,
+      status: "failed",
+      error: "pending_dispatch",
+    }).returning();
+
+    const retried = await svc.retryAutomation({
+      companyId: company.id,
+      caseId: created.case.id,
+      automationId: moved.automationLedger!.automationId,
+      actor: userActor,
+    });
+    expect(retried.status).toBe("failed");
+    const [execution] = await db
+      .select()
+      .from(pipelineAutomationExecutions)
+      .where(eq(pipelineAutomationExecutions.id, badExecution!.id));
+    expect(execution!.error).toContain("same company");
+    const events = await svc.listCaseEvents(company.id, created.case.id);
+    expect(events.filter((event) => event.type === "automation_failed")).toHaveLength(1);
   });
 });

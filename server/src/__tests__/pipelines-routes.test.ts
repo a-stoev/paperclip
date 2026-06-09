@@ -8,6 +8,8 @@ import {
   createDb,
   documents,
   documentRevisions,
+  heartbeatRuns,
+  issueComments,
   issues,
   pipelineAutomationExecutions,
   pipelineCaseBlockers,
@@ -18,6 +20,7 @@ import {
   pipelineStages,
   pipelineTransitions,
   pipelines,
+  routineRuns,
   routines,
 } from "@paperclipai/db";
 import {
@@ -25,6 +28,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/error-handler.js";
+import { issueRoutes } from "../routes/issues.js";
 import { pipelineRoutes } from "../routes/pipelines.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -39,6 +43,7 @@ if (!embeddedPostgresSupport.supported) {
 describeEmbeddedPostgres("pipeline routes", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  const noopHeartbeat = { wakeup: async () => null };
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-pipelines-routes-");
@@ -56,6 +61,9 @@ describeEmbeddedPostgres("pipeline routes", () => {
     await db.delete(pipelineDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
+    await db.delete(issueComments);
+    await db.delete(routineRuns);
+    await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(pipelines);
     await db.delete(routines);
@@ -74,7 +82,8 @@ describeEmbeddedPostgres("pipeline routes", () => {
       req.actor = actor;
       next();
     });
-    instance.use("/api", pipelineRoutes(db));
+    instance.use("/api", pipelineRoutes(db, { heartbeat: noopHeartbeat }));
+    instance.use("/api", issueRoutes(db, {} as any));
     instance.use(errorHandler);
     return instance;
   }
@@ -182,18 +191,32 @@ describeEmbeddedPostgres("pipeline routes", () => {
       .expect(200);
     await http.get(`/api/cases/${blocked.body.case.id}/rollup`).expect(200);
     await http.get(`/api/cases/${blocked.body.case.id}/context-pack`).expect(200);
-    await http.post(`/api/cases/${blocked.body.case.id}/open-conversation`).expect(201);
+    const conversation = await http.post(`/api/cases/${blocked.body.case.id}/open-conversation`).expect(201);
+    expect(conversation.body.created).toBe(true);
+    expect(conversation.body.issue.description).toContain("Pipeline Case Context");
+    const sameConversation = await http.post(`/api/cases/${blocked.body.case.id}/open-conversation`).expect(200);
+    expect(sameConversation.body.created).toBe(false);
+    expect(sameConversation.body.issue.id).toBe(conversation.body.issue.id);
 
-    const [agent] = await db.insert(agents).values({
+    const linkedIssue = await http.post(`/api/cases/${blocked.body.case.id}/issue-links`)
+      .send({ issueId: ingested.body.case.id, role: "work" });
+    expect(linkedIssue.status).toBe(404);
+    const manualIssue = await db.insert(issues).values({
       companyId: company.id,
-      name: "Routine Agent",
-      role: "engineer",
-      adapterType: "codex_local",
-      adapterConfig: {},
-      runtimeConfig: {},
-      permissions: {},
+      title: "Manual work issue",
+      status: "todo",
+      priority: "medium",
     }).returning();
-    const [routine] = await db.insert(routines).values({ companyId: company.id, title: "Routine", assigneeAgentId: agent!.id }).returning();
+    const workLink = await http.post(`/api/cases/${blocked.body.case.id}/issue-links`)
+      .send({ issueId: manualIssue[0]!.id, role: "work" })
+      .expect(201);
+    await http.get(`/api/cases/${blocked.body.case.id}/issue-links`).expect(200);
+    const issueDetail = await http.get(`/api/issues/${manualIssue[0]!.id}`).expect(200);
+    expect(issueDetail.body.linkedCases).toHaveLength(1);
+    expect(issueDetail.body.linkedCases[0].id).toBe(blocked.body.case.id);
+    await http.delete(`/api/cases/${blocked.body.case.id}/issue-links/${workLink.body.id}`).expect(200);
+
+    const [routine] = await db.insert(routines).values({ companyId: company.id, title: "Routine" }).returning();
     await db.insert(pipelineAutomationExecutions).values({
       companyId: company.id,
       caseId: blocked.body.case.id,
@@ -272,6 +295,143 @@ describeEmbeddedPostgres("pipeline routes", () => {
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("review_required");
+  });
+
+  it("validates review stage config on create and update", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+
+    await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({
+        key: "bad-review",
+        name: "Bad review",
+        stages: [
+          { key: "intake", name: "Intake", kind: "open", position: 100 },
+          { key: "review", name: "Review", kind: "review", position: 200 },
+          { key: "done", name: "Done", kind: "done", position: 900 },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled", position: 1000 },
+        ],
+      })
+      .expect(422);
+
+    const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "valid-review", name: "Valid review" }).expect(201);
+    const intake = pipeline.body.stages.find((stage: { key: string }) => stage.key === "intake");
+    await http.patch(`/api/pipelines/${pipeline.body.id}/stages/${intake.id}`).send({ kind: "review" }).expect(422);
+  });
+
+  it("applies review decisions atomically with edits and stores reject reasons verbatim", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "review-decisions", name: "Review decisions" }).expect(201);
+
+    const approved = await http
+      .post(`/api/pipelines/${pipeline.body.id}/cases`)
+      .send({ caseKey: "approve-edit", title: "Approve edit" })
+      .expect(201);
+    await http.post(`/api/cases/${approved.body.case.id}/transition`).send({ toStageKey: "review", expectedVersion: 1 }).expect(200);
+    const approval = await http
+      .post(`/api/cases/${approved.body.case.id}/review`)
+      .send({
+        decision: "approve",
+        expectedVersion: 2,
+        edits: { title: "Approved title", fields: { channel: "blog" } },
+      })
+      .expect(200);
+    expect(approval.body.case.version).toBe(4);
+    expect(approval.body.updateEvent.payload.version).toBe(3);
+    const approvedDetail = await http.get(`/api/cases/${approved.body.case.id}`).expect(200);
+    expect(approvedDetail.body.case.title).toBe("Approved title");
+    expect(approvedDetail.body.case.fields).toEqual({ channel: "blog" });
+    const approvedEvents = await http.get(`/api/cases/${approved.body.case.id}/events`).expect(200);
+    expect(approvedEvents.body.map((event: { type: string }) => event.type)).toEqual([
+      "ingested",
+      "transitioned",
+      "updated",
+      "transitioned",
+      "review_decided",
+    ]);
+
+    const rejected = await http
+      .post(`/api/pipelines/${pipeline.body.id}/cases`)
+      .send({ caseKey: "reject-reason", title: "Reject reason" })
+      .expect(201);
+    await http.post(`/api/cases/${rejected.body.case.id}/transition`).send({ toStageKey: "review", expectedVersion: 1 }).expect(200);
+    await http.post(`/api/cases/${rejected.body.case.id}/review`).send({ decision: "reject", expectedVersion: 2 }).expect(422);
+    const reason = "  Keep this exact reason.  ";
+    await http.post(`/api/cases/${rejected.body.case.id}/review`).send({ decision: "reject", reason, expectedVersion: 2 }).expect(200);
+    const rejectedEvents = await http.get(`/api/cases/${rejected.body.case.id}/events`).expect(200);
+    const reviewEvent = rejectedEvents.body.find((event: { type: string }) => event.type === "review_decided");
+    expect(reviewEvent.payload.reason).toBe(reason);
+  });
+
+  it("aggregates the review inbox across pipelines with parent and review config context", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const first = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "inbox-a", name: "Inbox A" }).expect(201);
+    const second = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "inbox-b", name: "Inbox B" }).expect(201);
+
+    const parent = await http
+      .post(`/api/pipelines/${first.body.id}/cases`)
+      .send({ caseKey: "parent", title: "Parent" })
+      .expect(201);
+    const child = await http
+      .post(`/api/pipelines/${first.body.id}/cases`)
+      .send({ caseKey: "child", title: "Child", parentCaseId: parent.body.case.id })
+      .expect(201);
+    await http.post(`/api/cases/${child.body.case.id}/transition`).send({ toStageKey: "review", expectedVersion: 1 }).expect(200);
+
+    const other = await http
+      .post(`/api/pipelines/${second.body.id}/cases`)
+      .send({ caseKey: "other", title: "Other" })
+      .expect(201);
+    await http.post(`/api/cases/${other.body.case.id}/transition`).send({ toStageKey: "review", expectedVersion: 1 }).expect(200);
+
+    const notReview = await http
+      .post(`/api/pipelines/${second.body.id}/cases`)
+      .send({ caseKey: "not-review", title: "Not review" })
+      .expect(201);
+    await http.post(`/api/cases/${notReview.body.case.id}/transition`).send({ toStageKey: "done", expectedVersion: 1 }).expect(200);
+
+    const inbox = await http.get(`/api/companies/${company.id}/review-cases`).expect(200);
+    expect(inbox.body).toHaveLength(2);
+    expect(inbox.body.map((row: { pipeline: { key: string } }) => row.pipeline.key).sort()).toEqual(["inbox-a", "inbox-b"]);
+    const childRow = inbox.body.find((row: { case: { id: string } }) => row.case.id === child.body.case.id);
+    expect(childRow.parentCase.id).toBe(parent.body.case.id);
+    expect(childRow.reviewConfig).toMatchObject({
+      approveToStageKey: "done",
+      rejectToStageKey: "cancelled",
+      requireRejectReason: true,
+      reviewerKind: "human",
+    });
+  });
+
+  it("bulk reviews partial successes without aborting stale items", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const pipeline = await http.post(`/api/companies/${company.id}/pipelines`).send({ key: "bulk-review", name: "Bulk review" }).expect(201);
+    const caseIds: string[] = [];
+    for (let index = 0; index < 50; index += 1) {
+      const created = await http
+        .post(`/api/pipelines/${pipeline.body.id}/cases`)
+        .send({ caseKey: `bulk-${index}`, title: `Bulk ${index}` })
+        .expect(201);
+      await http.post(`/api/cases/${created.body.case.id}/transition`).send({ toStageKey: "review", expectedVersion: 1 }).expect(200);
+      caseIds.push(created.body.case.id);
+    }
+    for (const staleCaseId of caseIds.slice(0, 3)) {
+      await http.patch(`/api/cases/${staleCaseId}`).send({ title: "Stale before bulk", expectedVersion: 2 }).expect(200);
+    }
+
+    const bulk = await http
+      .post(`/api/companies/${company.id}/review-cases/bulk`)
+      .send({ items: caseIds.map((caseId) => ({ caseId, decision: "approve", expectedVersion: 2 })) })
+      .expect(200);
+
+    expect(bulk.body.results.filter((item: { ok: boolean }) => item.ok)).toHaveLength(47);
+    const failed = bulk.body.results.filter((item: { ok: boolean }) => !item.ok);
+    expect(failed).toHaveLength(3);
+    expect(failed.every((item: { error: { code: string } }) => item.error.code === "version_conflict")).toBe(true);
   });
 
   it("returns conflict bodies with code, current version, and stage", async () => {
