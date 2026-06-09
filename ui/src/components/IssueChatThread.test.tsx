@@ -425,7 +425,7 @@ describe("IssueChatThread", () => {
     });
   });
 
-  it("hides the planning chip on a standard issue and exposes the toggle through the menu", () => {
+  it("shows a persistent neutral mode chip on a standard issue and toggles to planning through its menu", () => {
     const root = createRoot(container);
     const onWorkModeChange = vi.fn();
 
@@ -446,19 +446,20 @@ describe("IssueChatThread", () => {
       );
     });
 
-    expect(
-      container.querySelector('[data-testid="issue-chat-composer-work-mode-toggle"]'),
-    ).toBeNull();
+    // The mode chip is always present (mockup rev 5) — neutral "Standard" here.
+    const chip = container.querySelector(
+      '[data-testid="issue-chat-composer-work-mode-toggle"]',
+    ) as HTMLButtonElement | null;
+    expect(chip).not.toBeNull();
+    expect(chip?.getAttribute("data-pending-work-mode")).toBe("standard");
+    expect(chip?.textContent).toContain("Standard");
+
     const composer = container.querySelector('[data-testid="issue-chat-composer"]');
     expect(composer?.getAttribute("data-pending-work-mode")).toBe("standard");
     expect(composer?.className).not.toContain("amber");
 
-    const menuTrigger = container.querySelector(
-      '[data-testid="issue-chat-composer-work-mode-menu"]',
-    ) as HTMLButtonElement | null;
-    expect(menuTrigger).not.toBeNull();
     act(() => {
-      menuTrigger?.click();
+      chip?.click();
     });
 
     const menuItem = document.querySelector(
@@ -471,15 +472,11 @@ describe("IssueChatThread", () => {
       menuItem?.click();
     });
 
+    // Local pending switch only — does not mutate the issue until submit.
     expect(onWorkModeChange).not.toHaveBeenCalled();
     expect(composer?.getAttribute("data-pending-work-mode")).toBe("planning");
     expect(composer?.className).toContain("amber");
-
-    const visibleChip = container.querySelector(
-      '[data-testid="issue-chat-composer-work-mode-toggle"]',
-    );
-    expect(visibleChip).not.toBeNull();
-    expect(visibleChip?.textContent).toContain("Planning");
+    expect(chip?.textContent).toContain("Planning");
 
     act(() => {
       root.unmount();
@@ -784,6 +781,14 @@ describe("IssueChatThread", () => {
     ) as HTMLButtonElement | undefined;
     expect(jump).toBeDefined();
 
+    // Flush the on-load auto-scroll-to-latest (PAP-97) so this test measures
+    // only the jump-to-latest interaction, not the initial mount scroll.
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    elementScrollToMock.mockClear();
+    scrollIntoViewMock.mockClear();
+
     act(() => {
       jump?.click();
     });
@@ -804,6 +809,65 @@ describe("IssueChatThread", () => {
       root.unmount();
     });
     scrollHost.remove();
+  });
+
+  // PAP-97: on first thread load we land on the latest comment instead of the
+  // top of the thread (board rev-2 feedback for PAP-95). No deep-link hash and
+  // no user interaction — the scroll must happen purely from mounting.
+  it("auto-scrolls to the latest comment on initial load (PAP-97)", () => {
+    vi.useFakeTimers();
+    container.remove();
+    const scrollHost = document.createElement("main");
+    scrollHost.id = "main-content";
+    scrollHost.style.overflowY = "auto";
+    scrollHost.style.overflow = "auto";
+    scrollHost.style.height = "640px";
+    document.body.appendChild(scrollHost);
+    container = document.createElement("div");
+    scrollHost.appendChild(container);
+
+    const elementScrollToMock = vi.fn();
+    scrollHost.scrollTo = elementScrollToMock as unknown as typeof scrollHost.scrollTo;
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    const scrollIntoViewMock = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoViewMock as unknown as typeof Element.prototype.scrollIntoView;
+
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <IssueChatThread
+            comments={issueChatLongThreadComments}
+            linkedRuns={issueChatLongThreadLinkedRuns}
+            timelineEvents={issueChatLongThreadEvents}
+            liveRuns={[]}
+            agentMap={issueChatLongThreadAgentMap}
+            currentUserId="user-board"
+            onAdd={async () => {}}
+            enableLiveTranscriptPolling={false}
+            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
+            hasOutputForRun={(runId) => issueChatLongThreadTranscriptsByRunId.has(runId)}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    // No jump click — let the mount auto-scroll's rAF + settle ticks run.
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+
+    const scrolledToLatest =
+      elementScrollToMock.mock.calls.some(([arg]) => hasSmoothScrollBehavior(arg))
+      || scrollIntoViewMock.mock.calls.length > 0;
+    expect(scrolledToLatest).toBe(true);
+
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+    act(() => {
+      root.unmount();
+    });
+    scrollHost.remove();
+    vi.useRealTimers();
   });
 
   // Regression for PAP-2672: when the merged feed ends with a non-comment row

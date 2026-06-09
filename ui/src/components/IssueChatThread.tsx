@@ -175,6 +175,7 @@ interface IssueChatMessageContext {
   onCancelInteraction?: (
     interaction: AskUserQuestionsInteraction,
   ) => Promise<void> | void;
+  onUploadImage?: (file: File) => Promise<string>;
   issueStatus?: string;
   successfulRunHandoff?: SuccessfulRunHandoffState | null;
 }
@@ -637,14 +638,16 @@ function commentDateLabel(date: Date | string | undefined): string {
   return formatShortDate(date);
 }
 
-const IssueChatTextPart = memo(function IssueChatTextPart({ text, recessed }: { text: string; recessed?: boolean }) {
+const IssueChatTextPart = memo(function IssueChatTextPart({ text, recessed, onAccent }: { text: string; recessed?: boolean; onAccent?: boolean }) {
   const { onImageClick } = useContext(IssueChatCtx);
   if (isSuccessfulRunHandoffComment(text)) {
     return <SuccessfulRunHandoffCommentCallout text={text} recessed={recessed} onImageClick={onImageClick} />;
   }
   return (
     <MarkdownBody
-      className="text-sm leading-6"
+      // `prose-invert` flips typography colours (body, links, code) to light so
+      // markdown stays legible on the saturated liveness-blue human bubble.
+      className={cn("text-sm leading-6", onAccent && "prose-invert")}
       style={recessed ? { opacity: 0.55 } : undefined}
       softBreaks
       onImageClick={onImageClick}
@@ -1178,9 +1181,11 @@ function getThreadMessageCopyText(message: ThreadMessage) {
 const IssueChatTextParts = memo(function IssueChatTextParts({
   message,
   recessed = false,
+  onAccent = false,
 }: {
   message: ThreadMessage;
   recessed?: boolean;
+  onAccent?: boolean;
 }) {
   return (
     <>
@@ -1191,6 +1196,7 @@ const IssueChatTextParts = memo(function IssueChatTextParts({
             key={`${message.id}:text:${index}`}
             text={part.text}
             recessed={recessed}
+            onAccent={onAccent}
           />
         ))}
     </>
@@ -1334,11 +1340,17 @@ function IssueChatUserMessage({
       <div
         className={cn(
           "min-w-0 max-w-full overflow-hidden break-all rounded-2xl px-4 py-2.5",
+          // Tail-hugging corner: flatten the bottom corner nearest the avatar so
+          // the bubble points at it (bottom-right for the right-aligned human).
+          isCurrentUser ? "rounded-br-[4px]" : "rounded-bl-[4px]",
           queued
             ? "bg-amber-50/80 dark:bg-amber-500/10"
             : deleted
               ? "bg-muted/50 text-muted-foreground"
-            : "bg-muted",
+            : isCurrentUser
+              // Liveness blue (#2563EB) for the human's own messages (PAP-95 rev 5).
+              ? "bg-[#2563EB] text-white"
+              : "bg-muted",
           pending && "opacity-80",
         )}
       >
@@ -1374,7 +1386,7 @@ function IssueChatUserMessage({
           <div className="text-sm italic text-muted-foreground">Comment deleted</div>
         ) : (
           <div className="min-w-0 max-w-full space-y-3">
-            <IssueChatTextParts message={message} />
+            <IssueChatTextParts message={message} onAccent={isCurrentUser && !queued} />
           </div>
         )}
       </div>
@@ -1442,7 +1454,7 @@ function IssueChatUserMessage({
   return (
     <>
       <div id={anchorId}>
-        <div className={cn("group flex items-start gap-2.5", isCurrentUser && "justify-end")}>
+        <div className={cn("group flex items-end gap-2", isCurrentUser && "justify-end")}>
           {isCurrentUser ? (
             <>
               {messageBody}
@@ -1971,6 +1983,7 @@ function ExpiredRequestConfirmationActivity({
     onAcceptInteraction,
     onRejectInteraction,
     onCancelInteraction,
+    onUploadImage,
   } = useContext(IssueChatCtx);
   const [expanded, setExpanded] = useState(false);
   const hasResolvedActor = Boolean(interaction.resolvedByAgentId || interaction.resolvedByUserId);
@@ -2050,6 +2063,7 @@ function ExpiredRequestConfirmationActivity({
             onAcceptInteraction={onAcceptInteraction}
             onRejectInteraction={onRejectInteraction}
             onCancelInteraction={onCancelInteraction}
+            onUploadImage={onUploadImage}
           />
         </div>
       ) : null}
@@ -2426,6 +2440,34 @@ function SystemNoticeCommentRow({
   );
 }
 
+// Non-comment timeline items (run/status events, "updated this task",
+// "worked for N minutes") render as quiet, subordinate metadata rows hung off a
+// left rail — visually distinct from the bubbles used for genuine comments.
+// Virtualized rows are absolutely positioned, so each row carries its own rail
+// segment; stacked rows read as one continuous rail. See PAP-95 mockup rev 5.
+function IssueChatMetadataRow({
+  anchorId,
+  icon,
+  children,
+  testid = "issue-chat-metadata-row",
+}: {
+  anchorId?: string;
+  icon: ReactNode;
+  children: ReactNode;
+  testid?: string;
+}) {
+  return (
+    <div id={anchorId} data-testid={testid}>
+      <div className="ml-3 flex items-start gap-2.5 border-l-2 border-border/50 py-0.5 pl-3">
+        <span className="mt-px flex size-[18px] shrink-0 items-center justify-center rounded-full border border-border/70 bg-muted/30 text-muted-foreground/60">
+          {icon}
+        </span>
+        <div className="min-w-0 flex-1 space-y-1">{children}</div>
+      </div>
+    </div>
+  );
+}
+
 function IssueChatSystemMessage({ message }: { message: ThreadMessage }) {
   const {
     agentMap,
@@ -2435,6 +2477,7 @@ function IssueChatSystemMessage({ message }: { message: ThreadMessage }) {
     onRejectInteraction,
     onSubmitInteractionAnswers,
     onCancelInteraction,
+    onUploadImage,
   } = useContext(IssueChatCtx);
   const custom = message.metadata.custom as Record<string, unknown>;
   const anchorId = typeof custom.anchorId === "string" ? custom.anchorId : undefined;
@@ -2491,6 +2534,7 @@ function IssueChatSystemMessage({ message }: { message: ThreadMessage }) {
             onRejectInteraction={onRejectInteraction}
             onSubmitInteractionAnswers={onSubmitInteractionAnswers}
             onCancelInteraction={onCancelInteraction}
+            onUploadImage={onUploadImage}
           />
         </div>
       </div>
@@ -2498,45 +2542,47 @@ function IssueChatSystemMessage({ message }: { message: ThreadMessage }) {
   }
 
   if (custom.kind === "event" && actorName) {
-    const isCurrentUser = actorType === "user" && !!currentUserId && actorId === currentUserId;
     const isAgent = actorType === "agent";
     const agentIcon = isAgent && actorId ? agentMap?.get(actorId)?.icon : undefined;
+    const rowIcon = agentIcon
+      ? <AgentIcon icon={agentIcon} className="h-3 w-3" />
+      : <ClipboardList className="h-3 w-3" />;
 
-    const eventContent = (
-      <div className="min-w-0 space-y-1">
-        <div className={cn("flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs", isCurrentUser && "justify-end")}>
+    return (
+      <IssueChatMetadataRow anchorId={anchorId} icon={rowIcon}>
+        <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs">
           <span className="font-medium text-foreground">{actorName}</span>
           <span className="text-muted-foreground">
             {custom.followUpRequested === true ? "requested follow-up" : "updated this task"}
           </span>
           <a
             href={anchorId ? `#${anchorId}` : undefined}
-            className="text-xs text-muted-foreground transition-colors hover:text-foreground hover:underline"
+            className="text-xs text-muted-foreground/70 transition-colors hover:text-foreground hover:underline"
           >
             {timeAgo(message.createdAt)}
           </a>
         </div>
 
         {statusChange ? (
-          <div className={cn("flex flex-wrap items-center gap-1.5 text-xs", isCurrentUser && "justify-end")}>
-            <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
               Status
             </span>
             <span className="text-muted-foreground">{humanizeValue(statusChange.from)}</span>
-            <ArrowRight className="h-3 w-3 text-muted-foreground" />
+            <ArrowRight className="h-3 w-3 text-muted-foreground/70" />
             <span className="font-medium text-foreground">{humanizeValue(statusChange.to)}</span>
           </div>
         ) : null}
 
         {assigneeChange ? (
-          <div className={cn("flex flex-wrap items-center gap-1.5 text-xs", isCurrentUser && "justify-end")}>
-            <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
               Assignee
             </span>
             <span className="text-muted-foreground">
               {formatTimelineAssigneeLabel(assigneeChange.from, agentMap, currentUserId, userLabelMap)}
             </span>
-            <ArrowRight className="h-3 w-3 text-muted-foreground" />
+            <ArrowRight className="h-3 w-3 text-muted-foreground/70" />
             <span className="font-medium text-foreground">
               {formatTimelineAssigneeLabel(assigneeChange.to, agentMap, currentUserId, userLabelMap)}
             </span>
@@ -2544,89 +2590,54 @@ function IssueChatSystemMessage({ message }: { message: ThreadMessage }) {
         ) : null}
 
         {workspaceChange ? (
-          <div className={cn("flex flex-wrap items-center gap-1.5 text-xs", isCurrentUser && "justify-end")}>
-            <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
               Workspace
             </span>
             <span className="text-muted-foreground">
               {formatTimelineWorkspaceLabel(workspaceChange.from)}
             </span>
-            <ArrowRight className="h-3 w-3 text-muted-foreground" />
+            <ArrowRight className="h-3 w-3 text-muted-foreground/70" />
             <span className="font-medium text-foreground">
               {formatTimelineWorkspaceLabel(workspaceChange.to)}
             </span>
           </div>
         ) : null}
-      </div>
-    );
-
-    if (isCurrentUser) {
-      return (
-        <div id={anchorId}>
-          <div className="flex items-start justify-end gap-2 py-1">
-            {eventContent}
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div id={anchorId}>
-        <div className="flex items-start gap-2.5 py-1">
-          <Avatar size="sm" className="mt-0.5">
-            {agentIcon ? (
-              <AvatarFallback><AgentIcon icon={agentIcon} className="h-3.5 w-3.5" /></AvatarFallback>
-            ) : (
-              <AvatarFallback>{initialsForName(actorName)}</AvatarFallback>
-            )}
-          </Avatar>
-          <div className="flex-1">
-            {eventContent}
-          </div>
-        </div>
-      </div>
+      </IssueChatMetadataRow>
     );
   }
 
   const displayedRunAgentName = runAgentName ?? (runAgentId ? agentMap?.get(runAgentId)?.name ?? runAgentId.slice(0, 8) : null);
   const runAgentIcon = runAgentId ? agentMap?.get(runAgentId)?.icon : undefined;
   if (custom.kind === "run" && runId && runAgentId && displayedRunAgentName && runStatus) {
-    return (
-      <div id={anchorId}>
-        <div className="flex items-center gap-2.5 py-1">
-          <Avatar size="sm">
-            {runAgentIcon ? (
-              <AvatarFallback><AgentIcon icon={runAgentIcon} className="h-3.5 w-3.5" /></AvatarFallback>
-            ) : (
-              <AvatarFallback>{initialsForName(displayedRunAgentName)}</AvatarFallback>
-            )}
-          </Avatar>
+    const rowIcon = runAgentIcon
+      ? <AgentIcon icon={runAgentIcon} className="h-3 w-3" />
+      : <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/50" />;
 
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
-              <Link to={`/agents/${runAgentId}`} className="font-medium text-foreground transition-colors hover:underline">
-                {displayedRunAgentName}
-              </Link>
-              <span className="text-muted-foreground">run</span>
-              <Link
-                to={`/agents/${runAgentId}/runs/${runId}`}
-                className="inline-flex items-center rounded-md border border-border bg-accent/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
-              >
-                {runId.slice(0, 8)}
-              </Link>
-              <span className={cn("font-medium", runStatusClass(runStatus))}>
-                {formatRunStatusLabel(runStatus)}
-              </span>
-              <a
-                href={anchorId ? `#${anchorId}` : undefined}
-                className="text-xs text-muted-foreground transition-colors hover:text-foreground hover:underline"
-              >
-                {timeAgo(message.createdAt)}
-              </a>
-            </div>
-          </div>
+    return (
+      <IssueChatMetadataRow anchorId={anchorId} icon={rowIcon}>
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+          <Link to={`/agents/${runAgentId}`} className="font-medium text-foreground transition-colors hover:underline">
+            {displayedRunAgentName}
+          </Link>
+          <span className="text-muted-foreground">run</span>
+          <Link
+            to={`/agents/${runAgentId}/runs/${runId}`}
+            className="inline-flex items-center rounded-md border border-border bg-accent/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground"
+          >
+            {runId.slice(0, 8)}
+          </Link>
+          <span className={cn("font-medium", runStatusClass(runStatus))}>
+            {formatRunStatusLabel(runStatus)}
+          </span>
+          <a
+            href={anchorId ? `#${anchorId}` : undefined}
+            className="text-xs text-muted-foreground/70 transition-colors hover:text-foreground hover:underline"
+          >
+            {timeAgo(message.createdAt)}
+          </a>
         </div>
-      </div>
+      </IssueChatMetadataRow>
     );
   }
 
@@ -3629,23 +3640,47 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
           {canToggleWorkMode ? (
             <Popover open={workModeMenuOpen} onOpenChange={setWorkModeMenuOpen}>
               <PopoverTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  data-testid="issue-chat-composer-work-mode-menu"
-                  title="More composer options"
+                {/* Single persistent mode chip (PAP-95b mockup rev 5): yellow in
+                    planning, neutral in standard, caret opens the switch menu. */}
+                <button
+                  type="button"
+                  data-testid="issue-chat-composer-work-mode-toggle"
+                  data-pending-work-mode={pendingWorkMode}
+                  aria-haspopup="menu"
+                  aria-expanded={workModeMenuOpen}
+                  title={
+                    isPlanning
+                      ? "Planning mode is on for this submission. Click to change."
+                      : "Standard mode for this submission. Click to switch to planning."
+                  }
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-colors",
+                    isPlanning
+                      ? "border-amber-500/60 bg-amber-500/15 text-amber-800 hover:bg-amber-500/25 dark:border-amber-500/50 dark:bg-amber-500/15 dark:text-amber-200 dark:hover:bg-amber-500/25"
+                      : "border-border bg-muted/40 text-muted-foreground hover:bg-accent hover:text-foreground",
+                  )}
                 >
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
+                  {isPlanning ? (
+                    <ClipboardList className="h-3.5 w-3.5" aria-hidden />
+                  ) : (
+                    <Hammer className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                  <span>{isPlanning ? "Planning" : "Standard"}</span>
+                  <ChevronDown className="h-3 w-3 opacity-60" aria-hidden />
+                </button>
               </PopoverTrigger>
-              <PopoverContent className="w-44 p-1" align="start">
+              <PopoverContent
+                className="w-44 p-1"
+                align="start"
+                data-testid="issue-chat-composer-work-mode-menu"
+              >
                 <button
                   type="button"
                   data-testid="issue-chat-composer-work-mode-menu-toggle"
                   data-pending-work-mode={pendingWorkMode}
                   className={cn(
                     "flex w-full items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/50",
-                    isPlanning ? "text-amber-700 dark:text-amber-300" : "text-foreground",
+                    isPlanning ? "text-foreground" : "text-amber-700 dark:text-amber-300",
                   )}
                   onClick={() => {
                     setPendingWorkMode((prev) => (prev === "planning" ? "standard" : "planning"));
@@ -3661,20 +3696,6 @@ const IssueChatComposer = forwardRef<IssueChatComposerHandle, IssueChatComposerP
                 </button>
               </PopoverContent>
             </Popover>
-          ) : null}
-          {canToggleWorkMode && isPlanning ? (
-            <button
-              type="button"
-              data-testid="issue-chat-composer-work-mode-toggle"
-              data-pending-work-mode={pendingWorkMode}
-              aria-pressed
-              title="Planning mode is on for this submission. Click to switch to Standard."
-              onClick={() => setPendingWorkMode("standard")}
-              className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/60 bg-amber-500/15 px-2 py-1 text-xs text-amber-800 transition-colors hover:bg-amber-500/25 dark:border-amber-500/50 dark:bg-amber-500/15 dark:text-amber-200 dark:hover:bg-amber-500/25"
-            >
-              <ClipboardList className="h-3.5 w-3.5" aria-hidden />
-              <span>Planning</span>
-            </button>
           ) : null}
         </div>
 
@@ -3804,6 +3825,7 @@ export function IssueChatThread({
   const preserveComposerViewportRef = useRef(false);
   const pendingSubmitScrollRef = useRef(false);
   const lastUserMessageIdRef = useRef<string | null>(null);
+  const didInitialLatestScrollRef = useRef(false);
   const spacerBaselineAnchorRef = useRef<string | null>(null);
   const spacerInitialReserveRef = useRef(0);
   const latestSettleTimeoutsRef = useRef<number[]>([]);
@@ -4083,6 +4105,31 @@ export function IssueChatThread({
     };
   }, [location.hash, messageAnchorIndex, messages, useVirtualizedThread]);
 
+  // On first thread load, land on the latest comment instead of defaulting to
+  // the top (board rev-2 feedback for PAP-95). A deep-link hash takes
+  // precedence — the hash-scroll effect above owns that case. Runs once per
+  // mount, after messages first populate.
+  useEffect(() => {
+    if (didInitialLatestScrollRef.current) return;
+    if (variant !== "full") return;
+    if (messages.length === 0) return;
+    const hash = location.hash || (typeof window !== "undefined" ? window.location.hash : "");
+    if (
+      hash.startsWith("#comment-")
+      || hash.startsWith("#activity-")
+      || hash.startsWith("#run-")
+      || hash.startsWith("#interaction-")
+    ) {
+      didInitialLatestScrollRef.current = true;
+      return;
+    }
+    didInitialLatestScrollRef.current = true;
+    // Defer a frame so the virtualizer/DOM has mounted its initial rows before
+    // we resolve and scroll to the latest comment's anchor.
+    const frame = requestAnimationFrame(() => scrollToLatestCommentWithSettle(latestMessagesRef.current));
+    return () => cancelAnimationFrame(frame);
+  }, [messages, variant, location.hash]);
+
   function jumpToLatestFallback() {
     if (useVirtualizedThread) {
       virtualizedThreadRef.current?.scrollToLatest({ behavior: "smooth" });
@@ -4261,6 +4308,7 @@ export function IssueChatThread({
   const stableOnRejectInteraction = useStableEvent(onRejectInteraction);
   const stableOnSubmitInteractionAnswers = useStableEvent(onSubmitInteractionAnswers);
   const stableOnCancelInteraction = useStableEvent(onCancelInteraction);
+  const stableOnUploadImage = useStableEvent(imageUploadHandler);
 
   const chatCtx = useMemo<IssueChatMessageContext>(
     () => ({
@@ -4283,6 +4331,7 @@ export function IssueChatThread({
       onRejectInteraction: stableOnRejectInteraction,
       onSubmitInteractionAnswers: stableOnSubmitInteractionAnswers,
       onCancelInteraction: stableOnCancelInteraction,
+      onUploadImage: stableOnUploadImage,
       issueStatus,
       successfulRunHandoff,
     }),
@@ -4306,6 +4355,7 @@ export function IssueChatThread({
       stableOnRejectInteraction,
       stableOnSubmitInteractionAnswers,
       stableOnCancelInteraction,
+      stableOnUploadImage,
       issueStatus,
       successfulRunHandoff,
     ],
