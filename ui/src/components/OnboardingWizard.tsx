@@ -954,7 +954,7 @@ export function OnboardingWizard() {
         ].filter(Boolean).join("\n\n");
         await issuesApi.create(createdCompanyId, {
           title: `Hire: ${role.name}`,
-          description: `Hire a ${role.name} for the company.\n\n${roleSpec}`,
+          description: `Hire a ${role.name} for the team.\n\n${roleSpec}`,
           assigneeAgentId: createdAgentId,
           status: "todo"
         });
@@ -1425,7 +1425,7 @@ export function OnboardingWizard() {
                     className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
                     onClick={() => setMissionPath(null)}
                   >
-                    ← Change company name
+                    ← Change team name
                   </button>
                 </div>
               )}
@@ -1725,7 +1725,7 @@ export function OnboardingWizard() {
                           <p className="text-[11px] text-amber-900/90 leading-relaxed">
                             Claude failed while{" "}
                             <span className="font-mono">ANTHROPIC_API_KEY</span>{" "}
-                            is set. You can clear it in this CEO adapter config
+                            is set. You can clear it in this adapter config
                             and retry the probe.
                           </p>
                           <Button
@@ -1913,7 +1913,7 @@ export function OnboardingWizard() {
                   ) : (
                     <div className="rounded-md border border-border p-4 min-h-[200px] flex items-center justify-center">
                       <p className="text-sm text-muted-foreground">
-                        No planning task found. Go back and create your CEO first.
+                        No planning task found. Go back and create your team lead first.
                       </p>
                     </div>
                   )}
