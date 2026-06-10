@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { Activity, AlertTriangle, AppWindow, Plug, Server, ShieldAlert, Shield } from "lucide-react";
+import { Activity, AlertTriangle, AppWindow, Plug, Server, ShieldAlert } from "lucide-react";
 import { Link } from "@/lib/router";
 import { queryKeys } from "@/lib/queryKeys";
 import { toolsApi } from "@/api/tools";
@@ -75,7 +75,6 @@ export function OverviewTab({ companyId }: { companyId: string }) {
   const appList = apps.data?.applications ?? [];
   const connList = connections.data?.connections ?? [];
   const slotList = slots.data?.runtimeSlots ?? [];
-  const trustList = trustRules.data?.trustRules ?? [];
 
   const mcpApps = appList.filter((a) => a.type === "mcp_http" || a.type === "mcp_stdio").length;
   const pluginApps = appList.filter((a) => a.type === "paperclip_plugin").length;
@@ -83,9 +82,17 @@ export function OverviewTab({ companyId }: { companyId: string }) {
     (c) => c.enabled && (c.status ?? "active") !== "archived",
   ).length;
   const runningSlots = slotList.filter((s) => s.status === "running" || s.status === "idle").length;
-  const enabledTrust = trustList.filter((t) => t.enabled).length;
 
-  const recentDenials = (audit.data ?? []).filter((row) => DENY_ACTIONS.has(row.action)).slice(0, 6);
+  const allDenials = (audit.data ?? []).filter((row) => DENY_ACTIONS.has(row.action));
+  const dayCutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const denials24h = allDenials.filter((row) => {
+    const ts = new Date(row.createdAt).getTime();
+    return !Number.isFinite(ts) || ts >= dayCutoff;
+  });
+  const deniedCount = denials24h.filter((row) => row.action.endsWith("denied")).length;
+  const failedCount = denials24h.length - deniedCount;
+
+  const recentDenials = allDenials.slice(0, 6);
   const health = runtimeHealth.data;
   const metrics = health?.metrics;
   const firingAlerts = health?.alerts ?? [];
@@ -126,11 +133,11 @@ export function OverviewTab({ companyId }: { companyId: string }) {
         </Card>
         <Card className="overflow-hidden py-0">
           <MetricCard
-            icon={Shield}
-            label="Trust rules"
-            value={trustList.length}
-            description={`${enabledTrust} enabled`}
-            to="/company/settings/tools/policies"
+            icon={ShieldAlert}
+            label="Denials (24h)"
+            value={denials24h.length}
+            description={`${deniedCount} denied · ${failedCount} failed`}
+            to="/company/settings/tools/audit"
           />
         </Card>
       </div>
