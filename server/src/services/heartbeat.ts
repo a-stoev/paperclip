@@ -555,9 +555,13 @@ export function applyRunScopedMentionedSkillKeys(
 
   const existingPreference = readPaperclipSkillSyncPreference(config);
   return writePaperclipSkillSyncPreference(config, [
-    ...existingPreference.desiredSkills,
+    ...existingPreference.desiredSkillEntries,
     ...normalizedSkillKeys,
   ]);
+}
+
+function skillVersionSelectionMap(entries: Array<{ key: string; versionId: string | null }>) {
+  return new Map(entries.map((entry) => [entry.key, entry.versionId] as const));
 }
 
 export function computeBoundedTransientHeartbeatRetrySchedule(
@@ -8264,7 +8268,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       resolvedConfig,
       runScopedMentionedSkillKeys,
     );
-    const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId);
+    const runtimeSkillPreference = readPaperclipSkillSyncPreference(effectiveResolvedConfig);
+    const runtimeSkillEntries = await companySkills.listRuntimeSkillEntries(agent.companyId, {
+      versionSelections: skillVersionSelectionMap(runtimeSkillPreference.desiredSkillEntries),
+    });
     let runtimeConfig = {
       ...effectiveResolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,

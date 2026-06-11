@@ -1711,9 +1711,15 @@ async function resolveRequestedSkillEntriesOrThrow(
 
     const match = resolveSkillReference(skills, selection.key);
     if (match.skill) {
-      await assertVersionMatchesSkill(db, companyId, match.skill.id, selection.versionId);
-      if (!resolved.has(match.skill.key)) {
-        resolved.set(match.skill.key, { key: match.skill.key, versionId: selection.versionId });
+      const skill = skills.find((candidate) => candidate.id === match.skill?.id);
+      if (!skill) {
+        missing.add(selection.key);
+        continue;
+      }
+      const selectedVersionId = selection.versionId ?? skill.currentVersionId ?? null;
+      await assertVersionMatchesSkill(db, companyId, skill.id, selectedVersionId);
+      if (!resolved.has(skill.key)) {
+        resolved.set(skill.key, { key: skill.key, versionId: selectedVersionId });
       }
       continue;
     }
