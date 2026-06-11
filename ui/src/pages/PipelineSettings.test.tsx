@@ -334,18 +334,18 @@ describe("PipelineSettings", () => {
     queryClient.clear();
   });
 
-  it("syncs variables from {{name}} tokens and saves body + variables in one action", async () => {
+  it("syncs variables from escaped {{snake_case}} tokens and saves body + variables in one action", async () => {
     const { container, root, queryClient } = renderSettings();
     await flushQueries();
 
     const editor = container.querySelector<HTMLTextAreaElement>('[aria-label="Stage instructions"]')!;
     flushSync(() => {
-      setNativeValue(editor, "Draft {{topic}} for the {{channel}} channel");
+      setNativeValue(editor, "Draft {{customer\\_name}} for the {{event\\_date}} channel");
     });
     await flushQueries();
     // The real RoutineVariablesEditor detected and surfaced both variables.
-    expect(container.textContent).toContain("{{topic}}");
-    expect(container.textContent).toContain("{{channel}}");
+    expect(container.textContent).toContain("{{customer_name}}");
+    expect(container.textContent).toContain("{{event_date}}");
 
     const saveButton = findButton(container, "Save stage")!;
     expect(saveButton).toBeTruthy();
@@ -358,12 +358,12 @@ describe("PipelineSettings", () => {
     expect(pipelinesApi.upsertDocument).toHaveBeenCalledWith(
       "pipeline-1",
       "stage-instructions:stage-1",
-      expect.objectContaining({ body: "Draft {{topic}} for the {{channel}} channel", baseRevisionId: null }),
+      expect.objectContaining({ body: "Draft {{customer\\_name}} for the {{event\\_date}} channel", baseRevisionId: null }),
     );
     // ...and persists the synced routine variables in the stage config.
     const updateStageCalls = (pipelinesApi.updateStage as unknown as { mock: { calls: unknown[][] } }).mock.calls;
     const lastConfig = (updateStageCalls.at(-1)?.[2] as { config: { variables: Array<{ name: string }> } }).config;
-    expect(lastConfig.variables.map((variable) => variable.name)).toEqual(["topic", "channel"]);
+    expect(lastConfig.variables.map((variable) => variable.name)).toEqual(["customer_name", "event_date"]);
 
     flushSync(() => {
       root.unmount();
