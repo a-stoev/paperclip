@@ -129,6 +129,8 @@ export const queryKeys = {
     caseIssueLinks: (caseId: string) => ["pipelines", "item", caseId, "issue-links"] as const,
     intakeForm: (pipelineId: string) => ["pipelines", "intake-form", pipelineId] as const,
     document: (pipelineId: string, key: string) => ["pipelines", "document", pipelineId, key] as const,
+    documentRevisions: (pipelineId: string, key: string) =>
+      ["pipelines", "document-revisions", pipelineId, key] as const,
     attention: (companyId: string) => ["pipelines", "attention", companyId] as const,
     reviewCases: (companyId: string) => ["pipelines", "review-cases", companyId] as const,
     learnings: (companyId: string, offset: number) =>

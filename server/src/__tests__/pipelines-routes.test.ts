@@ -246,6 +246,85 @@ describeEmbeddedPostgres("pipeline routes", () => {
     await http.delete(`/api/pipelines/${pipelineId}/stages/${stageId}?moveCasesToStageId=${qaStage.body.id}`).expect(200);
   });
 
+  it("lists, guards, and restores pipeline document revisions", async () => {
+    const company = await seedCompany();
+    const http = request(app(boardActor));
+    const pipeline = await http
+      .post(`/api/companies/${company.id}/pipelines`)
+      .send({ key: "docs", name: "Docs" })
+      .expect(201);
+    const pipelineId = pipeline.body.id as string;
+
+    const first = await http
+      .put(`/api/pipelines/${pipelineId}/documents/guidance`)
+      .send({ title: "Guidance", body: "Version one" })
+      .expect(200);
+    expect(first.body.revision).toMatchObject({ revisionNumber: 1, body: "Version one" });
+
+    const second = await http
+      .put(`/api/pipelines/${pipelineId}/documents/guidance`)
+      .send({ title: "Guidance", body: "Version two", baseRevisionId: first.body.revision.id })
+      .expect(200);
+    expect(second.body.revision).toMatchObject({ revisionNumber: 2, body: "Version two" });
+
+    const listed = await http
+      .get(`/api/pipelines/${pipelineId}/documents/guidance/revisions`)
+      .expect(200);
+    expect(listed.body.map((revision: { revisionNumber: number; body: string }) => ({
+      revisionNumber: revision.revisionNumber,
+      body: revision.body,
+    }))).toEqual([
+      { revisionNumber: 2, body: "Version two" },
+      { revisionNumber: 1, body: "Version one" },
+    ]);
+
+    const stale = await http
+      .put(`/api/pipelines/${pipelineId}/documents/guidance`)
+      .send({ title: "Guidance", body: "Stale edit", baseRevisionId: first.body.revision.id })
+      .expect(409);
+    expect(stale.body).toMatchObject({
+      code: "stale_base_revision",
+      details: {
+        latestRevisionId: second.body.revision.id,
+        latestRevisionNumber: 2,
+        latestRevision: {
+          id: second.body.revision.id,
+          revisionNumber: 2,
+        },
+      },
+    });
+
+    const noBaseUpdate = await http
+      .put(`/api/pipelines/${pipelineId}/documents/guidance`)
+      .send({ title: "Guidance", body: "Version three" })
+      .expect(200);
+    expect(noBaseUpdate.body.revision).toMatchObject({ revisionNumber: 3, body: "Version three" });
+
+    const restored = await http
+      .post(`/api/pipelines/${pipelineId}/documents/guidance/revisions/${first.body.revision.id}/restore`)
+      .send({})
+      .expect(200);
+    expect(restored.body).toMatchObject({
+      restoredFromRevisionId: first.body.revision.id,
+      restoredFromRevisionNumber: 1,
+      revision: {
+        revisionNumber: 4,
+        body: "Version one",
+        changeSummary: "Restored from revision 1",
+      },
+      document: {
+        latestBody: "Version one",
+        latestRevisionNumber: 4,
+      },
+    });
+
+    const latest = await http
+      .get(`/api/pipelines/${pipelineId}/documents/guidance`)
+      .expect(200);
+    expect(latest.body.document.latestBody).toBe("Version one");
+    expect(latest.body.revision.id).toBe(restored.body.revision.id);
+  });
+
   it("exposes first-stage add form fields and returns row failures for missing required values", async () => {
     const company = await seedCompany();
     const http = request(app(boardActor));

@@ -74,6 +74,22 @@ export interface PipelineDocumentPayload {
   revision?: { body?: string | null; title?: string | null; [key: string]: unknown } | null;
 }
 
+export interface PipelineDocumentRevision {
+  id: string;
+  companyId: string;
+  documentId: string;
+  pipelineId: string;
+  key: string;
+  revisionNumber: number;
+  title: string | null;
+  format: string;
+  body: string;
+  changeSummary: string | null;
+  createdByAgentId: string | null;
+  createdByUserId: string | null;
+  createdAt: Date | string;
+}
+
 export type PipelineIntakeFieldType = "select" | "text" | "multiline";
 
 export interface PipelineIntakeField {
@@ -355,11 +371,20 @@ export const pipelinesApi = {
     ),
   getDocument: (pipelineId: string, key: string) =>
     api.get<PipelineDocumentPayload>(`/pipelines/${pipelineId}/documents/${encodeURIComponent(key)}`),
-  upsertDocument: (pipelineId: string, key: string, data: { title?: string; body: string }) =>
+  upsertDocument: (pipelineId: string, key: string, data: { title?: string; body: string; baseRevisionId?: string | null }) =>
     api.put<{ document: PipelineDocumentPayload["document"]; revision: NonNullable<PipelineDocumentPayload["revision"]> }>(
       `/pipelines/${pipelineId}/documents/${encodeURIComponent(key)}`,
       data,
     ),
+  listDocumentRevisions: (pipelineId: string, key: string) =>
+    api.get<PipelineDocumentRevision[]>(`/pipelines/${pipelineId}/documents/${encodeURIComponent(key)}/revisions`),
+  restoreDocumentRevision: (pipelineId: string, key: string, revisionId: string) =>
+    api.post<{
+      document: PipelineDocumentPayload["document"];
+      revision: PipelineDocumentRevision;
+      restoredFromRevisionId: string;
+      restoredFromRevisionNumber: number;
+    }>(`/pipelines/${pipelineId}/documents/${encodeURIComponent(key)}/revisions/${revisionId}/restore`, {}),
   getIntakeForm: (pipelineId: string) => api.get<PipelineIntakeForm>(`/pipelines/${pipelineId}/intake-form`),
   listCases: (pipelineId: string, filters?: { parentCaseId?: string; terminal?: boolean }) => {
     const params = new URLSearchParams();
